@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Distribution entitlements: used for Developer ID signed / notarized builds.
+
+  UnDupe is NOT sandboxed. A disk scanner needs to read across the whole
+  filesystem, and Full Disk Access is granted by the user via TCC (System
+  Settings ▸ Privacy & Security ▸ Full Disk Access) rather than by an
+  entitlement, so there is no app-sandbox key here. See the README.
+
+  The dict below is deliberately empty. The hardened runtime (codesign
+  -o runtime) is what notarization requires, and UnDupe needs none of its
+  exceptions: no JIT, no unsigned executable memory, no library-validation
+  opt-out. Any key added here has to be justified to the notary service, so
+  add nothing without a concrete reason.
+
+  Debug builds use UnDupe-debug.entitlements instead, which adds
+  get-task-allow. That key must never reach a notarized build (Apple rejects
+  it), which is why the two files are separate.
+
+  Two rules for editing this file: keep comments OUT of the <dict>, and never
+  write a double hyphen inside a comment. codesign feeds entitlements to
+  AMFI's strict XML parser, which rejects both with the unhelpful message
+  "Failed to parse entitlements: AMFIUnserializeXML: syntax error near line N".
+  Spell command flags in their short form (-o runtime) to stay clear of it.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

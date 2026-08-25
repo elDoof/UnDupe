@@ -1,0 +1,16 @@
+# SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# App bundle output
+build/
+
+# macOS
+.DS_Store
+
+# Xcode (if you open the package in Xcode later)
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+DerivedData/

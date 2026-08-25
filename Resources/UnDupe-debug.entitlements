@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Local development entitlements: used by ad-hoc (unsigned) builds only.
+  get-task-allow lets a debugger attach. Notarization REJECTS this key, so it
+  lives here rather than in UnDupe.entitlements and never reaches a
+  distributed build.
+
+  Keep comments out of the <dict>, and no double hyphens inside them; see the
+  note in UnDupe.entitlements.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.get-task-allow</key>
+    <true/>
+</dict>
+</plist>
