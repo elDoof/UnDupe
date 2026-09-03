@@ -14,8 +14,15 @@ struct SunburstView: View {
     /// The arc the user last clicked. Sticky (unlike `hovered`) so the inspector
     /// stays put on it while the cursor moves to the action buttons.
     @Binding var selected: FileNode?
+    /// Asks the host to confirm and trash a node, so deletion keeps going through
+    /// the one confirmation dialog `ResultsView` owns.
+    let onTrash: (FileNode) -> Void
 
     @State private var arcs: [SunburstArc] = []
+    /// The arc a right-click will act on. Tracks the cursor like `hovered`, but
+    /// is deliberately *not* cleared when the pointer leaves: while a context
+    /// menu is open the pointer has already left the canvas.
+    @State private var contextTarget: FileNode?
 
     /// Fraction of the radius used by the center hub.
     private let hubRatio: CGFloat = 0.24
@@ -39,7 +46,9 @@ struct SunburstView: View {
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
-                    hovered = hitTest(location, metrics: metrics)?.node
+                    let hit = hitTest(location, metrics: metrics)?.node
+                    hovered = hit
+                    if let hit { contextTarget = hit }
                 case .ended:
                     hovered = nil
                 }
@@ -49,9 +58,15 @@ struct SunburstView: View {
                     handleTap(at: event.location, metrics: metrics)
                 }
             )
+            .contextMenu { contextMenu }
         }
         .onAppear { recomputeArcs() }
-        .onChange(of: focus.id) { _ in recomputeArcs() }
+        // Zooming replaces every arc; see `TreemapView` for why the stale
+        // right-click target has to go with them.
+        .onChange(of: focus.id) { _ in
+            recomputeArcs()
+            contextTarget = nil
+        }
     }
 
     // MARK: - Drawing
@@ -105,6 +120,30 @@ struct SunburstView: View {
 
     // MARK: - Interaction
 
+    /// The right-click menu for the arc under the cursor. Mirrors `TreemapView`'s
+    /// — the two map styles are meant to be interchangeable.
+    @ViewBuilder
+    private var contextMenu: some View {
+        if let node = contextTarget {
+            FileContextMenu(
+                path: node.path,
+                name: node.name,
+                sizeBytes: node.size,
+                isDirectory: node.isDirectory,
+                // Acting from the menu also pins the inspector to that node, so
+                // the panel and the menu never disagree about the subject. Done
+                // per action rather than when the menu appears: mutating shared
+                // state while the menu's body is being built trips SwiftUI's
+                // "modifying state during view update" warning.
+                onOpenInMap: node.isDirectory && !node.children.isEmpty
+                    ? { selected = node; zoom(into: node) }
+                    : nil,
+                onReveal: { selected = node; FileActions.reveal(node.path) },
+                onTrash: { selected = node; onTrash(node) }
+            )
+        }
+    }
+
     private func handleTap(at point: CGPoint, metrics: Metrics) {
         let dx = point.x - metrics.center.x
         let dy = point.y - metrics.center.y
@@ -123,8 +162,12 @@ struct SunburstView: View {
         guard let arc = hitTest(point, metrics: metrics) else { return }
         selected = arc.node
         if arc.node.isDirectory, !arc.node.children.isEmpty {
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { focus = arc.node }
+            zoom(into: arc.node)
         }
+    }
+
+    private func zoom(into node: FileNode) {
+        withAnimation(.spring(response: 0.45, dampingFraction: 0.8)) { focus = node }
     }
 
     private func hitTest(_ point: CGPoint, metrics: Metrics) -> SunburstArc? {

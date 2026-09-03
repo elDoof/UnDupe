@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import UnDupeCore
 
 /// The results screen: breadcrumb + Map/Duplicates switch, with the sunburst and
@@ -141,11 +140,13 @@ struct ResultsView: View {
                     }
                 },
                 onSelect: { selectedNode = $0 },
-                onReveal: revealInFinder,
+                onReveal: { FileActions.reveal($0.path) },
+                onQuickLook: { FileActions.quickLook($0.path) },
                 onTrash: { pendingTrash = $0 }
             )
             .frame(width: 320)
         }
+        .focusedSceneValue(\.mapActions, mapActions(root: root))
         .confirmationDialog(
             pendingTrash.map { "Move “\($0.name)” to Trash?" } ?? "",
             isPresented: Binding(get: { pendingTrash != nil },
@@ -228,11 +229,13 @@ struct ResultsView: View {
         let focus = Binding(get: { focusNode ?? root }, set: { focusNode = $0 })
         switch mapStyle {
         case .treemap:
-            TreemapView(root: root, focus: focus, hovered: $hovered, selected: $selectedNode)
+            TreemapView(root: root, focus: focus, hovered: $hovered,
+                        selected: $selectedNode, onTrash: { pendingTrash = $0 })
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
         case .sunburst:
-            SunburstView(root: root, focus: focus, hovered: $hovered, selected: $selectedNode)
+            SunburstView(root: root, focus: focus, hovered: $hovered,
+                         selected: $selectedNode, onTrash: { pendingTrash = $0 })
                 .padding(24)
         }
     }
@@ -253,28 +256,42 @@ struct ResultsView: View {
         return "\(ByteFormat.string(node.size)). You can restore it from the Trash."
     }
 
-    /// How long the success toast lingers before it auto-dismisses.
-    private static let statusToastDuration: TimeInterval = 3.5
+    /// How long the status toast lingers before it auto-dismisses.
+    private static let statusToastDuration: Duration = .seconds(3.5)
 
     private var statusToast: some View {
         Group {
             if let message = model.statusMessage {
-                Text(message)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.primaryText)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(Capsule().fill(Theme.success.opacity(0.25)))
-                    .overlay(Capsule().stroke(Theme.success.opacity(0.5), lineWidth: 1))
-                    .padding(.bottom, 18)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .onAppear {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + Self.statusToastDuration) {
-                            withAnimation { model.statusMessage = nil }
-                        }
+                HStack(spacing: 12) {
+                    Text(message)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.primaryText)
+
+                    if model.canUndoTrash {
+                        Button("Undo") { model.undoLastTrash() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Theme.accent)
                     }
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(Capsule().fill(Theme.success.opacity(0.25)))
+                .overlay(Capsule().stroke(Theme.success.opacity(0.5), lineWidth: 1))
+                .padding(.bottom, 18)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                // Re-armed whenever the message or the undo offer changes.
+                .task(id: "\(message)|\(model.canUndoTrash)") {
+                    // The toast is the only place Undo lives, so while it is on
+                    // offer the toast stays put rather than timing out from
+                    // under the user.
+                    guard !model.canUndoTrash else { return }
+                    do { try await Task.sleep(for: Self.statusToastDuration) } catch { return }
+                    withAnimation { model.statusMessage = nil }
+                }
             }
         }
         .animation(.easeInOut, value: model.statusMessage)
+        .animation(.easeInOut, value: model.canUndoTrash)
     }
 
     // MARK: - Helpers
@@ -290,8 +307,30 @@ struct ResultsView: View {
         return chain.reversed()
     }
 
-    private func revealInFinder(_ node: FileNode) {
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: node.path)])
+    /// What the menu bar's Item menu acts on: the same node the inspector is
+    /// showing, so the menu and the panel can never disagree.
+    private func actionTarget(root: FileNode) -> FileNode {
+        hovered ?? selectedNode ?? focusNode ?? root
+    }
+
+    /// Publishes the map screen's actions to `AppCommands`. Commands live outside
+    /// the view hierarchy and can't read this view's `@State`, so they are handed
+    /// across as closures; the menu items grey out on other screens because the
+    /// focused value is absent there.
+    private func mapActions(root: FileNode) -> MapActions {
+        let target = actionTarget(root: root)
+        let focus = focusNode ?? root
+        return MapActions(
+            targetName: target.name,
+            quickLook: { FileActions.quickLook(target.path) },
+            open: { FileActions.open(target.path) },
+            reveal: { FileActions.reveal(target.path) },
+            copyPath: { FileActions.copyPath(target.path) },
+            trash: ProtectedPaths.isDeletable(target.path) ? { pendingTrash = target } : nil,
+            goUp: focus !== root ? focus.parent.map { parent in
+                { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { focusNode = parent } }
+            } : nil
+        )
     }
 }
 
@@ -303,6 +342,7 @@ private struct InspectorPanel: View {
     let onOpen: (FileNode) -> Void
     let onSelect: (FileNode) -> Void
     let onReveal: (FileNode) -> Void
+    let onQuickLook: (FileNode) -> Void
     let onTrash: (FileNode) -> Void
 
     var body: some View {
@@ -331,13 +371,19 @@ private struct InspectorPanel: View {
             HStack(spacing: 10) {
                 Button { onReveal(node) } label: { Label("Reveal", systemImage: "magnifyingglass") }
                     .buttonStyle(.bordered)
+                Button { onQuickLook(node) } label: { Label("Preview", systemImage: "eye") }
+                    .buttonStyle(.bordered)
+                    .help("Preview with Quick Look")
                 Button(role: .destructive) { onTrash(node) } label: {
                     Label(node.isDirectory ? "Trash Folder" : "Trash", systemImage: "trash")
                 }
                 .buttonStyle(.bordered)
                 .tint(Theme.danger)
+                .disabled(!ProtectedPaths.isDeletable(node.path))
+                .help(ProtectedPaths.refusalReason(node.path) ?? "Move this item to the Trash")
             }
             .controlSize(.small)
+            .contextMenu { menu(for: node) }
 
             if node.isDirectory && !node.children.isEmpty {
                 Divider().overlay(Theme.hairline)
@@ -416,8 +462,27 @@ private struct InspectorPanel: View {
                     .foregroundStyle(Theme.danger)
             }
             .buttonStyle(.plain)
-            .help("Move “\(child.name)” to Trash")
+            .disabled(!ProtectedPaths.isDeletable(child.path))
+            .help(ProtectedPaths.refusalReason(child.path)
+                  ?? "Move “\(child.name)” to Trash")
         }
         .hoverHighlight(cornerRadius: 8)
+        .contextMenu { menu(for: child) }
+    }
+
+    /// The shared right-click menu, so an inspector row offers exactly what a
+    /// map tile does.
+    private func menu(for node: FileNode) -> some View {
+        FileContextMenu(
+            path: node.path,
+            name: node.name,
+            sizeBytes: node.size,
+            isDirectory: node.isDirectory,
+            onOpenInMap: node.isDirectory && !node.children.isEmpty
+                ? { onSelect(node); onOpen(node) }
+                : nil,
+            onReveal: { onReveal(node) },
+            onTrash: { onTrash(node) }
+        )
     }
 }

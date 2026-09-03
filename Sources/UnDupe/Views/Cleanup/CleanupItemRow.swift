@@ -1,5 +1,4 @@
 import SwiftUI
-import AppKit
 import UnDupeCore
 
 /// Small color-coded pill showing who owns an item. The whole cleanup UI keys
@@ -35,7 +34,7 @@ struct RevealButton: View {
 
     var body: some View {
         Button {
-            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
+            FileActions.reveal(path)
         } label: {
             Image(systemName: "magnifyingglass").font(.system(size: 11))
         }

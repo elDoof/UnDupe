@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in UnDupe behaved incorrectly.
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: UnDupe version
+      description: Shown in UnDupe ▸ About UnDupe.
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and Mac model
+      placeholder: "macOS 15.2, M2 MacBook Air"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: full-disk-access
+    attributes:
+      label: Does UnDupe have Full Disk Access?
+      options: ["Yes", "No", "Not sure"]
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: >
+        What was being scanned (an external drive? a network volume? iCloud
+        Drive?), and a screenshot if the problem is visual.

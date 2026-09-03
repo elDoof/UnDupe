@@ -34,6 +34,13 @@ engine, not in the confirmation dialog.
   based app uninstaller that finds an app's leftovers without guessing.
 - **Honest totals** — if UnDupe can't read part of your disk, it says so rather
   than quietly reporting a smaller number.
+- **Right-click anywhere** — open, preview with Quick Look, reveal in Finder,
+  copy a path, or trash, from the map, the inspector and the duplicate list
+  alike. Anything UnDupe won't delete says so *before* you click, not after.
+- **Undo** — moved something to the Trash by mistake? One click puts it back and
+  restores the folder totals it came out of.
+- **Keyboard driven** — ⌘R rescan, Space to Quick Look, ⌘↑ to go up a level,
+  ⌘⌫ to trash, ⌘Z to undo.
 
 ## Install
 
@@ -42,6 +49,12 @@ Download the latest `UnDupe-<version>.dmg` from
 
 The app is signed with a Developer ID and notarized by Apple, so it opens with a
 normal double-click — no right-click ▸ Open, no Gatekeeper warning.
+
+After that, UnDupe keeps itself current: **UnDupe ▸ Check for Updates…**, or a
+quiet check on launch that only speaks up when there's a newer release. An update
+is installed **only if it is signed by the same developer certificate as the copy
+already running** — so a compromised release, or a proxied download, still can't
+install anything. See [Updating](docs/ARCHITECTURE.md#updating) for the details.
 
 Requires macOS 13 or later. Universal: Apple silicon and Intel.
 
@@ -89,6 +102,11 @@ The package enforces a two-layer split: a pure engine with no UI dependencies,
 and a SwiftUI app that consumes it. All filesystem, scanning, and hashing logic
 lives in the engine and stays out of the views.
 
+**[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** goes through the design in
+depth — the bulk-metadata scanner, volume boundaries, the duplicate funnel, the
+deletion guard and its two carve-outs, the squarified treemap, and the update
+security model.
+
 ```
 Sources/
   UnDupeCore/          Engine — no UI imports
@@ -100,13 +118,16 @@ Sources/
     SafeDelete              the only code path that removes anything
     FullDiskAccess          detects whether totals can be trusted
     JunkScanner, AppUninstaller, StartupItemsScanner, ExtensionsScanner
+    Updates/                release feed, signature pinning, self-install
   UnDupe/              SwiftUI app
     Treemap/                squarified treemap geometry + view
     Sunburst/               radial map geometry + view
-    Views/                  Home, Scan, Results, Duplicates, Cleanup
+    Support/                theme, shared file actions, the right-click menu
+    Views/                  Home, Scan, Results, Duplicates, Cleanup, Update
   undupe-scan/         Headless CLI for validating the engine against du
 Tests/
-  UnDupeCoreTests/     Deletion guard, scan outcomes
+  UnDupeCoreTests/     Deletion guard, trash/restore, tree accounting,
+                       scan outcomes, update decisions
   UnDupeTests/         Treemap geometry and hit testing
 ```
 
@@ -134,4 +155,11 @@ the honest answer.
   does not have this problem — it de-duplicates by `(device, inode)`.
 - The disk map is drawn on a `Canvas` and is not yet reachable by VoiceOver.
   The inspector and all list views are.
-- There is no in-app update mechanism yet.
+- Undo covers the most recent trash only; it isn't a full history.
+- Self-update replaces the app in place, so it needs write access to wherever
+  UnDupe is installed. Installed to `/Applications` on a Mac where you aren't an
+  admin, it will tell you to download the release manually instead.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -67,6 +67,10 @@ DMG="$ROOT/build/UnDupe-$VERSION.dmg"
 
 # Both swift build invocations must get identical flags: --show-bin-path
 # reports a different directory for a universal build (.build/apple/Products).
+#
+# Expanded as "${ARCH_FLAGS[@]+...}" below: macOS ships bash 3.2, where an empty
+# array expanded under `set -u` counts as an unbound variable and aborts the
+# script — which is every non-universal build.
 ARCH_FLAGS=()
 if $DO_UNIVERSAL; then
     ARCH_FLAGS=(--arch arm64 --arch x86_64)
@@ -74,9 +78,9 @@ if $DO_UNIVERSAL; then
 else
     echo "▸ Compiling UnDupe ($CONFIG, native only)…"
 fi
-swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --product UnDupe
+swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product UnDupe
 
-BIN_DIR="$(swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --product UnDupe --show-bin-path)"
+BIN_DIR="$(swift build -c "$CONFIG" ${ARCH_FLAGS[@]+"${ARCH_FLAGS[@]}"} --product UnDupe --show-bin-path)"
 EXECUTABLE="$BIN_DIR/UnDupe"
 [[ -f "$EXECUTABLE" ]] || die "Built executable not found at $EXECUTABLE"
 

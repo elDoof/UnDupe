@@ -93,6 +93,31 @@ public final class FileNode: Identifiable {
         self.parent = nil
     }
 
+    /// Puts this node back under `parent`, adding its size and file count back to
+    /// every ancestor — the exact inverse of `detachFromParent()`, used when the
+    /// user undoes a trash so the map returns to what it showed before.
+    ///
+    /// A node that still has a parent is ignored: re-adding an attached node would
+    /// double-count it up the whole ancestor chain.
+    public func reattach(to parent: FileNode) {
+        guard self.parent == nil else { return }
+
+        self.parent = parent
+        parent.children.append(self)
+        // Children are held largest-first (see `sortDescendingBySize`), and both
+        // the treemap and the inspector's LARGEST ITEMS list rely on that order.
+        parent.children.sort { $0.size > $1.size }
+
+        let sizeDelta = size
+        let countDelta = fileCount
+        var ancestor: FileNode? = parent
+        while let node = ancestor {
+            node.size += sizeDelta
+            node.fileCount += countDelta
+            ancestor = node.parent
+        }
+    }
+
     /// Sorts children largest-first, recursively. Called once when a scan finishes.
     func sortDescendingBySize() {
         children.sort { $0.size > $1.size }

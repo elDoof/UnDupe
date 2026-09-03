@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Build
+        run: swift build --build-tests
+
+      - name: Test
+        run: swift test
+
+      - name: Assemble the app bundle
+        run: Scripts/build-app.sh release
+
+      - name: Verify the bundle launches its checks
+        run: |
+          test -x build/UnDupe.app/Contents/MacOS/UnDupe
+          codesign --verify --verbose build/UnDupe.app

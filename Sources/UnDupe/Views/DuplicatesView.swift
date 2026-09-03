@@ -1,5 +1,5 @@
 import SwiftUI
-import AppKit
+import Foundation
 import UnDupeCore
 
 /// Review-first duplicate manager. Identical files are grouped; the user picks
@@ -9,6 +9,8 @@ struct DuplicatesView: View {
 
     /// File ids marked for trashing (everything not marked is kept).
     @State private var marked: Set<UUID> = []
+    /// Drives the confirmation dialog for the batch trash.
+    @State private var isConfirmingTrash = false
 
     var body: some View {
         Group {
@@ -23,6 +25,18 @@ struct DuplicatesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: model.duplicates.count) { _ in resetSelection() }
         .onAppear { if marked.isEmpty { resetSelection() } }
+        // Trashing several files at once is the most destructive thing this
+        // screen does, so it gets the same confirmation the map's single-item
+        // trash has always had.
+        .confirmationDialog(
+            "Move \(markedReclaimable.count) item(s) to Trash?",
+            isPresented: $isConfirmingTrash
+        ) {
+            Button("Move to Trash", role: .destructive) { trashMarked() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(ByteFormat.string(markedReclaimableBytes)) will be reclaimed. Every set keeps at least one copy, and you can restore anything from the Trash.")
+        }
     }
 
     // MARK: - States
@@ -90,7 +104,7 @@ struct DuplicatesView: View {
             .buttonStyle(.bordered)
             .controlSize(.regular)
             .help("Re-select the default: keep one copy of each set, trash the rest")
-            Button(role: .destructive) { trashMarked() } label: {
+            Button(role: .destructive) { isConfirmingTrash = true } label: {
                 Label("Move Selected to Trash", systemImage: "trash")
             }
             .buttonStyle(.borderedProminent)
@@ -152,9 +166,7 @@ struct DuplicatesView: View {
 
             Spacer()
 
-            Button {
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
-            } label: {
+            Button { FileActions.reveal(file.path) } label: {
                 Image(systemName: "magnifyingglass").font(.system(size: 11))
             }
             .buttonStyle(.plain)
@@ -163,6 +175,22 @@ struct DuplicatesView: View {
             .accessibilityLabel("Reveal in Finder")
         }
         .padding(.vertical, 3)
+        .contextMenu {
+            FileContextMenu(
+                path: file.path,
+                name: (file.path as NSString).lastPathComponent,
+                sizeBytes: file.size,
+                isDirectory: false,
+                // Trashing straight from the menu would bypass the review model
+                // this screen is built on, so the last kept copy stays protected
+                // exactly as the checkbox is.
+                extraTrashBlock: isLastKept
+                    ? "This is the last copy in its set — UnDupe always keeps one."
+                    : nil,
+                onReveal: { FileActions.reveal(file.path) },
+                onTrash: { model.trash([file]); marked.remove(file.id) }
+            )
+        }
     }
 
     // MARK: - Selection logic

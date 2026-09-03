@@ -54,6 +54,10 @@ final class AppModel: ObservableObject {
     // One-shot feedback after a trash action.
     @Published var statusMessage: String?
 
+    /// Whether the last trash can still be put back. Drives the Undo affordance
+    /// on the status toast and the Edit ▸ Undo menu item.
+    @Published private(set) var canUndoTrash = false
+
     /// Why the last scan produced nothing, when it wasn't a cancellation.
     /// Cleared whenever a new scan starts or the user returns home.
     @Published private(set) var scanError: String?
@@ -64,6 +68,24 @@ final class AppModel: ObservableObject {
 
     private var scanEngine: ScanEngine?
     private var dupFinder: DuplicateFinder?
+
+    /// Everything needed to reverse the most recent trash. Single level by
+    /// design: a second trash replaces it rather than building a stack, which
+    /// keeps the promise the UI makes ("Undo") honest and unambiguous.
+    private struct TrashUndo {
+        /// Only the items that actually reached the Trash — a refused item has
+        /// nothing to put back.
+        let results: [TrashResult]
+        /// Nodes to splice back into the tree, paired with the parent they hung
+        /// from. `detachFromParent()` nils that link, so it is captured first.
+        let detached: [(node: FileNode, parent: FileNode)]
+        /// The duplicate groups as they stood before trashing pruned them.
+        let duplicates: [DuplicateGroup]
+    }
+
+    private var lastTrash: TrashUndo? {
+        didSet { canUndoTrash = lastTrash != nil }
+    }
 
     var totalReclaimable: Int64 { duplicates.reduce(0) { $0 + $1.reclaimableBytes } }
 
@@ -113,6 +135,9 @@ final class AppModel: ObservableObject {
         scanningPath = path
         scanError = nil
         duplicates = []
+        // The pending undo refers to nodes in the tree we're about to discard;
+        // reattaching them afterwards would splice orphans into nothing.
+        lastTrash = nil
         phase = .scanning
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -176,9 +201,17 @@ final class AppModel: ObservableObject {
         roots = []
         selectedRoot = nil
         duplicates = []
+        lastTrash = nil
         phase = .home
         statusMessage = nil
         scanError = nil
+    }
+
+    /// Re-runs the scan on the folder currently being shown. The map is a
+    /// snapshot, so this is how the user picks up changes made outside UnDupe.
+    func rescan() {
+        guard let root = selectedRoot else { return }
+        startScan(path: root.path)
     }
 
     /// Re-probes the Full Disk Access grant. Cheap, and worth doing whenever the
@@ -229,11 +262,20 @@ final class AppModel: ObservableObject {
     }
 
     private func applyTrashResults(_ results: [TrashResult], files: [FileNode]) {
-        let succeededPaths = Set(results.filter { $0.success }.map { $0.path })
+        let succeeded = results.filter { $0.success }
+        let succeededPaths = Set(succeeded.map { $0.path })
         let reclaimed = results.reduce(0) { $0 + $1.reclaimedBytes }
         let failures = results.filter { !$0.success }
 
-        // Update the tree so the sunburst reflects freed space.
+        // Captured before the detach loop below: `detachFromParent()` nils the
+        // parent link an undo would need to put the node back.
+        let detached = files.compactMap { file -> (node: FileNode, parent: FileNode)? in
+            guard succeededPaths.contains(file.path), let parent = file.parent else { return nil }
+            return (file, parent)
+        }
+        let duplicatesBeforeTrash = duplicates
+
+        // Update the tree so the map reflects freed space.
         for file in files where succeededPaths.contains(file.path) {
             file.detachFromParent()
         }
@@ -247,10 +289,59 @@ final class AppModel: ObservableObject {
 
         objectWillChange.send()   // FileNode mutations aren't observable on their own
 
+        lastTrash = succeeded.isEmpty
+            ? nil
+            : TrashUndo(results: succeeded, detached: detached, duplicates: duplicatesBeforeTrash)
+
         if failures.isEmpty {
             statusMessage = "Moved \(succeededPaths.count) item(s) to Trash — freed \(ByteFormat.string(reclaimed))."
         } else {
             statusMessage = "Freed \(ByteFormat.string(reclaimed)). \(failures.count) item(s) couldn't be removed (protected or in use)."
+        }
+    }
+
+    // MARK: - Undo
+
+    /// Puts the most recent trash back: the files return to disk and the tree
+    /// returns to the totals it showed beforehand.
+    func undoLastTrash() {
+        guard let undo = lastTrash else { return }
+        // Taken immediately so a double-click on Undo can't run the restore twice.
+        lastTrash = nil
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let restored = SafeDelete.putBack(undo.results)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.applyUndoResults(restored, undo: undo)
+            }
+        }
+    }
+
+    private func applyUndoResults(_ restored: [TrashResult], undo: TrashUndo) {
+        let restoredPaths = Set(restored.filter { $0.success }.map { $0.path })
+        let putBack = restored.reduce(0) { $0 + $1.reclaimedBytes }
+        let failures = restored.filter { !$0.success }
+
+        for entry in undo.detached where restoredPaths.contains(entry.node.path) {
+            entry.node.reattach(to: entry.parent)
+        }
+
+        // Only restore the duplicate list when every copy came back. A partial
+        // restore would leave groups pointing at files still sitting in the Trash.
+        if failures.isEmpty {
+            duplicates = undo.duplicates
+        }
+
+        objectWillChange.send()
+
+        if failures.isEmpty {
+            statusMessage = "Put \(restoredPaths.count) item(s) back — \(ByteFormat.string(putBack)) restored."
+        } else if restoredPaths.isEmpty {
+            statusMessage = failures.first?.error
+                ?? "Nothing could be put back — the Trash may have been emptied."
+        } else {
+            statusMessage = "Put \(restoredPaths.count) item(s) back. \(failures.count) couldn't be restored."
         }
     }
 }

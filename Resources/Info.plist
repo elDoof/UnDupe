@@ -17,16 +17,13 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.2.0</string>
+	<string>0.3.0</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.utilities</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
-	<!-- TCC usage strings: macOS shows these when UnDupe first reads from a
-	     protected location. Scanning everything also needs Full Disk Access,
-	     which the user grants in System Settings. -->
 	<key>NSDesktopFolderUsageDescription</key>
 	<string>UnDupe scans your Desktop to show what's using space and find duplicates.</string>
 	<key>NSDocumentsFolderUsageDescription</key>

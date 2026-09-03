@@ -18,9 +18,17 @@ struct TreemapView: View {
     /// The tile the user last clicked. Sticky (unlike `hovered`) so the inspector
     /// stays put on it while the cursor travels to the action buttons.
     @Binding var selected: FileNode?
+    /// Asks the host to confirm and trash a node, so deletion keeps going through
+    /// the one confirmation dialog `ResultsView` owns.
+    let onTrash: (FileNode) -> Void
 
     @State private var tiles: [TreemapTile] = []
     @State private var layoutSize: CGSize = .zero
+    /// The tile a right-click will act on. Tracks the cursor like `hovered`, but
+    /// is deliberately *not* cleared when the pointer leaves: while a context
+    /// menu is open the pointer has already left the canvas, and clearing here
+    /// would blank the menu the user is reading.
+    @State private var contextTarget: FileNode?
 
     /// Corner rounding of a tile. Small: at treemap densities anything larger
     /// eats visible area and makes neighbouring tiles look detached.
@@ -45,15 +53,24 @@ struct TreemapView: View {
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
-                    hovered = TreemapLayout.hitTest(location, in: tiles)?.node
+                    let hit = TreemapLayout.hitTest(location, in: tiles)?.node
+                    hovered = hit
+                    if let hit { contextTarget = hit }
                 case .ended:
                     hovered = nil
                 }
             }
             .gesture(SpatialTapGesture().onEnded { handleTap(at: $0.location) })
+            .contextMenu { contextMenu }
             .onAppear { rebuild(size: geo.size) }
             .onChange(of: geo.size) { rebuild(size: $0) }
-            .onChange(of: focus.id) { _ in rebuild(size: layoutSize) }
+            // Zooming replaces every tile, so the previous right-click target is
+            // no longer on screen; a menu opened before the next mouse move would
+            // otherwise act on a tile the user can't see.
+            .onChange(of: focus.id) { _ in
+                rebuild(size: layoutSize)
+                contextTarget = nil
+            }
         }
     }
 
@@ -149,6 +166,34 @@ struct TreemapView: View {
 
     // MARK: - Interaction
 
+    /// The right-click menu for the tile under the cursor.
+    ///
+    /// A `Canvas` draws every tile itself, so there is no per-tile view to attach
+    /// a menu to; the target is the one the hover hit-test already resolved,
+    /// which is by definition the tile the pointer is over. The menu names it in
+    /// its header so the user can see what they are about to act on.
+    @ViewBuilder
+    private var contextMenu: some View {
+        if let node = contextTarget {
+            FileContextMenu(
+                path: node.path,
+                name: node.name,
+                sizeBytes: node.size,
+                isDirectory: node.isDirectory,
+                // Acting from the menu also pins the inspector to that node, so
+                // the panel and the menu never disagree about the subject. Done
+                // per action rather than when the menu appears: mutating shared
+                // state while the menu's body is being built trips SwiftUI's
+                // "modifying state during view update" warning.
+                onOpenInMap: node.isDirectory && !node.children.isEmpty
+                    ? { selected = node; zoom(into: node) }
+                    : nil,
+                onReveal: { selected = node; FileActions.reveal(node.path) },
+                onTrash: { selected = node; onTrash(node) }
+            )
+        }
+    }
+
     private func handleTap(at point: CGPoint) {
         guard let tile = TreemapLayout.hitTest(point, in: tiles) else {
             // Bare background: treat as "zoom out", matching the sunburst hub.
@@ -157,8 +202,12 @@ struct TreemapView: View {
         }
         selected = tile.node
         if tile.node.isDirectory, !tile.node.children.isEmpty {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { focus = tile.node }
+            zoom(into: tile.node)
         }
+    }
+
+    private func zoom(into node: FileNode) {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { focus = node }
     }
 
     private func zoomOut() {
