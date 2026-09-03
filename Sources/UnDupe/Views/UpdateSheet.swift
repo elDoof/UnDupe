@@ -80,11 +80,8 @@ struct UpdateSheet: View {
                     .foregroundStyle(Theme.tertiaryText)
             } else {
                 ScrollView {
-                    Text(release.notes)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.secondaryText)
+                    ReleaseNotes(markdown: release.notes)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
                 }
                 .frame(maxHeight: .infinity)
             }
@@ -160,6 +157,78 @@ struct UpdateSheet: View {
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.cancelAction)
             }
+        }
+    }
+}
+
+
+/// Renders a release body as something readable.
+///
+/// GitHub release notes are Markdown, and `Text` only understands the *inline*
+/// part of it — a raw `### Heading` or `- item` would otherwise be shown to the
+/// user verbatim. This handles the few block constructs that actually appear in
+/// a changelog and leaves the rest to SwiftUI's inline parser.
+private struct ReleaseNotes: View {
+
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .heading(let text):
+                    inline(text)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.primaryText)
+                        .padding(.top, 4)
+                case .bullet(let text):
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("•").foregroundStyle(Theme.tertiaryText)
+                        inline(text).foregroundStyle(Theme.secondaryText)
+                    }
+                    .font(.system(size: 12))
+                case .paragraph(let text):
+                    inline(text)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.secondaryText)
+                }
+            }
+        }
+        .textSelection(.enabled)
+    }
+
+    /// Inline Markdown (`**bold**`, `` `code` ``, links) via `AttributedString`,
+    /// falling back to the raw text if it doesn't parse.
+    private func inline(_ text: String) -> Text {
+        if let attributed = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            return Text(attributed)
+        }
+        return Text(text)
+    }
+
+    private enum Block {
+        case heading(String)
+        case bullet(String)
+        case paragraph(String)
+    }
+
+    private var blocks: [Block] {
+        markdown.components(separatedBy: .newlines).compactMap { raw in
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty else { return nil }
+            // A horizontal rule is a separator, not content.
+            if line.allSatisfy({ $0 == "-" }) && line.count >= 3 { return nil }
+
+            if line.hasPrefix("#") {
+                return .heading(String(line.drop(while: { $0 == "#" || $0 == " " })))
+            }
+            if line.hasPrefix("- ") || line.hasPrefix("* ") {
+                return .bullet(String(line.dropFirst(2)))
+            }
+            return .paragraph(line)
         }
     }
 }
