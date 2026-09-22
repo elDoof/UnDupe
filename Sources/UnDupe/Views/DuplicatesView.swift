@@ -162,6 +162,7 @@ struct DuplicatesView: View {
                 .foregroundStyle(isMarked ? Theme.tertiaryText : Theme.primaryText)
                 .strikethrough(isMarked)
                 .lineLimit(1).truncationMode(.middle)
+                .help(file.path)
                 .animation(.easeOut(duration: 0.15), value: isMarked)
 
             Spacer()

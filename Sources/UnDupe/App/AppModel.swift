@@ -51,6 +51,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var dupHashed: Int = 0
     @Published private(set) var dupTotal: Int = 0
 
+    /// Includes descendants so cached map shapes cannot act on removed items.
+    @Published private(set) var trashedNodeIDs: Set<UUID> = []
+
     // One-shot feedback after a trash action.
     @Published var statusMessage: String?
 
@@ -138,6 +141,7 @@ final class AppModel: ObservableObject {
         // The pending undo refers to nodes in the tree we're about to discard;
         // reattaching them afterwards would splice orphans into nothing.
         lastTrash = nil
+        trashedNodeIDs = []
         phase = .scanning
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -202,6 +206,7 @@ final class AppModel: ObservableObject {
         selectedRoot = nil
         duplicates = []
         lastTrash = nil
+        trashedNodeIDs = []
         phase = .home
         statusMessage = nil
         scanError = nil
@@ -277,6 +282,7 @@ final class AppModel: ObservableObject {
 
         // Update the tree so the map reflects freed space.
         for file in files where succeededPaths.contains(file.path) {
+            markTrashed(file, removed: true)
             file.detachFromParent()
         }
 
@@ -298,6 +304,12 @@ final class AppModel: ObservableObject {
         } else {
             statusMessage = "Freed \(ByteFormat.string(reclaimed)). \(failures.count) item(s) couldn't be removed (protected or in use)."
         }
+    }
+
+    private func markTrashed(_ node: FileNode, removed: Bool) {
+        if removed { trashedNodeIDs.insert(node.id) }
+        else { trashedNodeIDs.remove(node.id) }
+        for child in node.children { markTrashed(child, removed: removed) }
     }
 
     // MARK: - Undo
@@ -325,6 +337,7 @@ final class AppModel: ObservableObject {
 
         for entry in undo.detached where restoredPaths.contains(entry.node.path) {
             entry.node.reattach(to: entry.parent)
+            markTrashed(entry.node, removed: false)
         }
 
         // Only restore the duplicate list when every copy came back. A partial

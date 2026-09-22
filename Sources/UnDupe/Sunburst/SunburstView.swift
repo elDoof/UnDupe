@@ -16,6 +16,7 @@ struct SunburstView: View {
     @Binding var selected: FileNode?
     /// Asks the host to confirm and trash a node, so deletion keeps going through
     /// the one confirmation dialog `ResultsView` owns.
+    var trashedNodeIDs: Set<UUID> = []
     let onTrash: (FileNode) -> Void
 
     @State private var arcs: [SunburstArc] = []
@@ -23,6 +24,7 @@ struct SunburstView: View {
     /// is deliberately *not* cleared when the pointer leaves: while a context
     /// menu is open the pointer has already left the canvas.
     @State private var contextTarget: FileNode?
+    @State private var previousTrashedNodeIDs: Set<UUID> = []
 
     /// Fraction of the radius used by the center hub.
     private let hubRatio: CGFloat = 0.24
@@ -47,8 +49,9 @@ struct SunburstView: View {
                 switch phase {
                 case .active(let location):
                     let hit = hitTest(location, metrics: metrics)?.node
-                    hovered = hit
-                    if let hit { contextTarget = hit }
+                    let activeHit = hit.flatMap { trashedNodeIDs.contains($0.id) ? nil : $0 }
+                    hovered = activeHit
+                    contextTarget = activeHit
                 case .ended:
                     hovered = nil
                 }
@@ -60,7 +63,18 @@ struct SunburstView: View {
             )
             .contextMenu { contextMenu }
         }
-        .onAppear { recomputeArcs() }
+        .onAppear {
+            previousTrashedNodeIDs = trashedNodeIDs
+            recomputeArcs()
+        }
+        .onChange(of: trashedNodeIDs) { removed in
+            contextTarget = nil
+            defer { previousTrashedNodeIDs = removed }
+            // An undo may restore a node omitted by a layout built while it was trashed.
+            if !previousTrashedNodeIDs.isSubset(of: removed) {
+                recomputeArcs()
+            }
+        }
         // Zooming replaces every arc; see `TreemapView` for why the stale
         // right-click target has to go with them.
         .onChange(of: focus.id) { _ in
@@ -79,10 +93,13 @@ struct SunburstView: View {
                 center: metrics.center, innerR: inner, outerR: outer,
                 start: arc.startAngle, end: arc.endAngle
             )
-            let isHot = hovered?.id == arc.node.id
-            context.fill(path, with: .color(Theme.arcColor(hue: arc.hue, depth: arc.depth, highlighted: isHot)))
-            if isHot {
-                context.stroke(path, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
+            let removed = trashedNodeIDs.contains(arc.node.id)
+            let isHot = !removed && hovered?.id == arc.node.id
+            context.fill(path, with: .color(removed ? Color(white: 0.22) : Theme.arcColor(hue: arc.hue, depth: arc.depth, highlighted: isHot)))
+            let isSelected = !removed && selected?.id == arc.node.id
+            if isHot || isSelected {
+                context.stroke(path, with: .color(.white.opacity(isSelected ? 1 : 0.9)),
+                               lineWidth: isSelected ? 2.5 : 1.5)
             }
         }
     }
@@ -124,7 +141,7 @@ struct SunburstView: View {
     /// — the two map styles are meant to be interchangeable.
     @ViewBuilder
     private var contextMenu: some View {
-        if let node = contextTarget {
+        if let node = contextTarget, !trashedNodeIDs.contains(node.id) {
             FileContextMenu(
                 path: node.path,
                 name: node.name,
@@ -160,6 +177,7 @@ struct SunburstView: View {
         // Tap on any arc selects it (pins the inspector); a non-empty folder also
         // zooms in.
         guard let arc = hitTest(point, metrics: metrics) else { return }
+        guard !trashedNodeIDs.contains(arc.node.id) else { return }
         selected = arc.node
         if arc.node.isDirectory, !arc.node.children.isEmpty {
             zoom(into: arc.node)

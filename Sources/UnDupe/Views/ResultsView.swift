@@ -50,6 +50,11 @@ struct ResultsView: View {
                 }
             }
             .overlay(alignment: .bottom) { statusToast }
+            .onChange(of: model.trashedNodeIDs) { removed in
+                if let node = hovered, removed.contains(node.id) { hovered = nil }
+                if let node = selectedNode, removed.contains(node.id) { selectedNode = nil }
+                if let node = focusNode, removed.contains(node.id) { focusNode = root }
+            }
         } else {
             Color.clear.onAppear { model.reset() }
         }
@@ -71,6 +76,19 @@ struct ResultsView: View {
             .help("Discard these results and scan something else")
             .fixedSize()
             .layoutPriority(1) // never compressed or pushed off-screen
+
+            Button { model.rescan() } label: {
+                Label("Rescan", systemImage: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.secondaryText)
+            .hoverHighlight(cornerRadius: 8)
+            .help("Refresh the scan to include changes made in Finder (⌘R)")
+            .fixedSize()
+            .layoutPriority(1)
 
             // A deep path can be long; let it scroll within its own space instead
             // of pushing the back button or the tab picker out of the window.
@@ -116,6 +134,7 @@ struct ResultsView: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 12, weight: index == trail.count - 1 ? .semibold : .regular))
                 .foregroundStyle(index == trail.count - 1 ? Theme.primaryText : Theme.secondaryText)
+                .help(node.path)
             }
         }
     }
@@ -230,12 +249,12 @@ struct ResultsView: View {
         switch mapStyle {
         case .treemap:
             TreemapView(root: root, focus: focus, hovered: $hovered,
-                        selected: $selectedNode, onTrash: { pendingTrash = $0 })
+                        selected: $selectedNode, trashedNodeIDs: model.trashedNodeIDs, onTrash: { pendingTrash = $0 })
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
         case .sunburst:
             SunburstView(root: root, focus: focus, hovered: $hovered,
-                         selected: $selectedNode, onTrash: { pendingTrash = $0 })
+                         selected: $selectedNode, trashedNodeIDs: model.trashedNodeIDs, onTrash: { pendingTrash = $0 })
                 .padding(24)
         }
     }
@@ -243,9 +262,6 @@ struct ResultsView: View {
     /// Moves `node` to the Trash and tidies up focus/selection so the views don't
     /// point at a detached node.
     private func confirmTrash(_ node: FileNode) {
-        if focusNode === node { focusNode = node.parent }
-        if selectedNode === node { selectedNode = nil }
-        if hovered === node { hovered = nil }
         model.trash([node])
     }
 
@@ -357,6 +373,8 @@ private struct InspectorPanel: View {
                         .lineLimit(2)
                 }
                 Text(node.path)
+                    .textSelection(.enabled)
+                    .help(node.path)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(Theme.tertiaryText)
                     .lineLimit(2)
@@ -467,6 +485,7 @@ private struct InspectorPanel: View {
                   ?? "Move “\(child.name)” to Trash")
         }
         .hoverHighlight(cornerRadius: 8)
+        .help(child.path)
         .contextMenu { menu(for: child) }
     }
 

@@ -20,6 +20,7 @@ struct TreemapView: View {
     @Binding var selected: FileNode?
     /// Asks the host to confirm and trash a node, so deletion keeps going through
     /// the one confirmation dialog `ResultsView` owns.
+    var trashedNodeIDs: Set<UUID> = []
     let onTrash: (FileNode) -> Void
 
     @State private var tiles: [TreemapTile] = []
@@ -29,6 +30,7 @@ struct TreemapView: View {
     /// menu is open the pointer has already left the canvas, and clearing here
     /// would blank the menu the user is reading.
     @State private var contextTarget: FileNode?
+    @State private var previousTrashedNodeIDs: Set<UUID> = []
 
     /// Corner rounding of a tile. Small: at treemap densities anything larger
     /// eats visible area and makes neighbouring tiles look detached.
@@ -54,15 +56,27 @@ struct TreemapView: View {
                 switch phase {
                 case .active(let location):
                     let hit = TreemapLayout.hitTest(location, in: tiles)?.node
-                    hovered = hit
-                    if let hit { contextTarget = hit }
+                    let activeHit = hit.flatMap { trashedNodeIDs.contains($0.id) ? nil : $0 }
+                    hovered = activeHit
+                    contextTarget = activeHit
                 case .ended:
                     hovered = nil
                 }
             }
             .gesture(SpatialTapGesture().onEnded { handleTap(at: $0.location) })
             .contextMenu { contextMenu }
-            .onAppear { rebuild(size: geo.size) }
+            .onAppear {
+                previousTrashedNodeIDs = trashedNodeIDs
+                rebuild(size: geo.size)
+            }
+            .onChange(of: trashedNodeIDs) { removed in
+                contextTarget = nil
+                defer { previousTrashedNodeIDs = removed }
+                // An undo may restore a node omitted by a layout built while it was trashed.
+                if !previousTrashedNodeIDs.isSubset(of: removed) {
+                    rebuild(size: layoutSize)
+                }
+            }
             .onChange(of: geo.size) { rebuild(size: $0) }
             // Zooming replaces every tile, so the previous right-click target is
             // no longer on screen; a menu opened before the next mouse move would
@@ -87,9 +101,10 @@ struct TreemapView: View {
     private func draw(in context: GraphicsContext) {
         for tile in tiles {
             let path = Path(roundedRect: tile.rect, cornerRadius: cornerRadius)
-            let isHot = hovered?.id == tile.node.id
+            let removed = trashedNodeIDs.contains(tile.node.id)
+            let isHot = !removed && hovered?.id == tile.node.id
 
-            context.fill(path, with: .color(Theme.tileColor(hue: tile.hue, depth: tile.depth, highlighted: isHot)))
+            context.fill(path, with: .color(removed ? Color(white: 0.22) : Theme.tileColor(hue: tile.hue, depth: tile.depth, highlighted: isHot)))
             // A hairline of the background between neighbours; without it a run
             // of same-hue siblings melts into one blob.
             context.stroke(path, with: .color(.black.opacity(0.28)), lineWidth: 0.5)
@@ -97,6 +112,13 @@ struct TreemapView: View {
                 context.stroke(path, with: .color(.white.opacity(0.9)), lineWidth: 1.5)
             }
             drawLabel(for: tile, in: context)
+        }
+        // Draw last so a selected container stays outlined above its children.
+        if let tile = tiles.first(where: { $0.node.id == selected?.id }),
+           !trashedNodeIDs.contains(tile.node.id) {
+            let outline = Path(roundedRect: tile.rect.insetBy(dx: 1.5, dy: 1.5),
+                               cornerRadius: cornerRadius)
+            context.stroke(outline, with: .color(.white), lineWidth: 2)
         }
     }
 
@@ -120,14 +142,15 @@ struct TreemapView: View {
         context: GraphicsContext,
         stacked: Bool
     ) {
-        let ink = Theme.tileLabelColor(depth: tile.depth)
+        let removed = trashedNodeIDs.contains(tile.node.id)
+        let ink = removed ? Color.gray : Theme.tileLabelColor(depth: tile.depth)
         let name = context.resolve(
-            Text(tile.node.name)
+            Text(tile.node.name).strikethrough(removed)
                 .font(.system(size: 10.5, weight: .medium))
                 .foregroundColor(ink)
         )
         let size = context.resolve(
-            Text(ByteFormat.string(tile.node.size))
+            Text(removed ? "Moved to Trash" : ByteFormat.string(tile.node.size))
                 .font(.system(size: 9.5, weight: .regular))
                 .foregroundColor(ink.opacity(0.75))
         )
@@ -174,7 +197,7 @@ struct TreemapView: View {
     /// its header so the user can see what they are about to act on.
     @ViewBuilder
     private var contextMenu: some View {
-        if let node = contextTarget {
+        if let node = contextTarget, !trashedNodeIDs.contains(node.id) {
             FileContextMenu(
                 path: node.path,
                 name: node.name,
@@ -200,6 +223,7 @@ struct TreemapView: View {
             zoomOut()
             return
         }
+        guard !trashedNodeIDs.contains(tile.node.id) else { return }
         selected = tile.node
         if tile.node.isDirectory, !tile.node.children.isEmpty {
             zoom(into: tile.node)
