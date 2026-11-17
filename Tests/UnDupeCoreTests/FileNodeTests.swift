@@ -49,6 +49,28 @@ final class FileNodeTests: XCTestCase {
                       "expected a child named \(name); got \(root.children.map(\.name))")
     }
 
+    // MARK: - Lookup by path
+
+    func testFindsADescendantByItsPath() throws {
+        let leaf = try XCTUnwrap(root.descendant(atPath: root.path + "/nested/deep/leaf.bin"))
+        XCTAssertEqual(leaf.name, "leaf.bin")
+        XCTAssertFalse(leaf.isDirectory)
+
+        let folder = try XCTUnwrap(root.descendant(atPath: root.path + "/nested/deep"))
+        XCTAssertTrue(folder.isDirectory)
+    }
+
+    func testLookingUpTheRootsOwnPathReturnsTheRoot() {
+        XCTAssertTrue(root.descendant(atPath: root.path) === root)
+    }
+
+    func testAPathThatIsNoLongerInTheTreeFindsNothing() {
+        XCTAssertNil(root.descendant(atPath: root.path + "/nested/gone/leaf.bin"))
+        XCTAssertNil(root.descendant(atPath: "/somewhere/else/entirely"))
+        // Shares the root's characters without being inside it.
+        XCTAssertNil(root.descendant(atPath: root.path + "-sibling/keep"))
+    }
+
     // MARK: - Detach
 
     func testDetachingSubtractsFromEveryAncestor() throws {

@@ -195,19 +195,6 @@ public enum ExtensionsScanner {
 
     @discardableResult
     private static func runPluginkit(_ args: [String]) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        process.arguments = args
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            return nil
-        }
+        ProcessRunner.run("/usr/bin/pluginkit", args)?.text
     }
 }

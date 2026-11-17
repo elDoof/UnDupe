@@ -39,7 +39,7 @@ struct JunkView: View {
             Button("Move to Trash", role: .destructive) { performClear() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(selectedItems.count) item(s) (\(ByteFormat.string(selectedBytes))) will be moved to the Trash. Apps rebuild these as needed; you can restore them until you empty the Trash.")
+            Text("\(CountFormat.string(selectedItems.count, "item")) (\(ByteFormat.string(selectedBytes))) will be moved to the Trash. Apps rebuild these as needed; you can restore them until you empty the Trash.")
         }
     }
 
@@ -71,7 +71,7 @@ struct JunkView: View {
                 Text("\(ByteFormat.string(totalBytes)) of junk found")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.primaryText)
-                Text("Select what to clear — everything here is safe and recoverable.")
+                Text("Select what to clear — it all goes to the Trash, so you can put it back.")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.secondaryText)
             }
@@ -112,9 +112,12 @@ struct JunkView: View {
                     .foregroundStyle(Theme.secondaryText)
                 Spacer()
             }
-            Text(category.explanation)
+            // A category that can't be rebuilt gets its warning in plain sight
+            // rather than in the same quiet grey as "safe to clear".
+            Label(category.explanation,
+                  systemImage: category.isAutoCleanable ? "info.circle" : "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.tertiaryText)
+                .foregroundStyle(category.isAutoCleanable ? Theme.tertiaryText : Theme.danger)
             VStack(spacing: 6) {
                 ForEach(category.items) { item in
                     itemRow(item)

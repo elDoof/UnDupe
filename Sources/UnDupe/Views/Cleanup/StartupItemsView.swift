@@ -250,9 +250,9 @@ struct StartupItemsView: View {
         let count = selectedItems.count
         switch kind {
         case .disable:
-            return "\(count) item(s) will be turned off and won't launch at login. You can re-enable them here at any time."
+            return "\(CountFormat.string(count, "item")) will be turned off and won't launch at login. You can re-enable them here at any time."
         case .remove:
-            return "\(count) item(s) will be moved to the Trash. You can restore them from the Trash until you empty it."
+            return "\(CountFormat.string(count, "item")) will be moved to the Trash. You can restore them from the Trash until you empty it."
         }
     }
 

@@ -18,7 +18,9 @@ struct AutoCleanupSheet: View {
     private enum Phase: Equatable {
         case selecting
         case cleaning
-        case done(reclaimed: Int64, failed: Int)
+        /// `permanently` is captured when the clean starts, so the summary
+        /// describes what actually happened even if the switch is touched since.
+        case done(reclaimed: Int64, failed: Int, permanently: Bool)
     }
 
     /// Category names selected for cleaning. Defaults to all once a scan lands.
@@ -39,10 +41,10 @@ struct AutoCleanupSheet: View {
                 .frame(minHeight: 360)
         }
         .onAppear {
-            if cleanup.junkCategories.isEmpty { cleanup.loadJunk() }
+            if cleanup.autoCleanableJunkCategories.isEmpty { cleanup.loadJunk() }
             seedSelectionIfNeeded()
         }
-        .onChange(of: cleanup.junkCategories) { _ in seedSelectionIfNeeded(force: true) }
+        .onChange(of: cleanup.autoCleanableJunkCategories) { _ in seedSelectionIfNeeded(force: true) }
     }
 
     @ViewBuilder
@@ -50,7 +52,8 @@ struct AutoCleanupSheet: View {
         switch phase {
         case .selecting: selecting
         case .cleaning:  cleaning
-        case .done(let reclaimed, let failed): doneView(reclaimed: reclaimed, failed: failed)
+        case .done(let reclaimed, let failed, let permanently):
+            doneView(reclaimed: reclaimed, failed: failed, permanently: permanently)
         }
     }
 
@@ -60,10 +63,10 @@ struct AutoCleanupSheet: View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if cleanup.isScanningJunk && cleanup.junkCategories.isEmpty {
+            if cleanup.isScanningJunk && cleanup.autoCleanableJunkCategories.isEmpty {
                 CleanupLoadingState(label: "Finding safe-to-clear files…")
                     .frame(maxHeight: .infinity)
-            } else if cleanup.junkCategories.isEmpty {
+            } else if cleanup.autoCleanableJunkCategories.isEmpty {
                 CleanupEmptyState(
                     icon: "sparkles",
                     title: "Nothing to clean",
@@ -87,7 +90,9 @@ struct AutoCleanupSheet: View {
                     Text("Automatic Cleanup")
                         .font(.system(size: 17, weight: .bold, design: .rounded))
                         .foregroundStyle(Theme.primaryText)
-                    Text("Choose what to clear — everything is safe and recoverable.")
+                    Text(deletePermanently
+                         ? "Choose what to clear — permanent deletion can't be undone."
+                         : "Choose what to clear — everything goes to the Trash.")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.secondaryText)
                 }
@@ -106,7 +111,7 @@ struct AutoCleanupSheet: View {
     private var categoryList: some View {
         ScrollView {
             VStack(spacing: 10) {
-                ForEach(cleanup.junkCategories) { category in
+                ForEach(cleanup.autoCleanableJunkCategories) { category in
                     categoryRow(category)
                 }
             }
@@ -137,7 +142,7 @@ struct AutoCleanupSheet: View {
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.secondaryText)
                         .multilineTextAlignment(.leading)
-                    Text("\(category.items.count) item(s)")
+                    Text(CountFormat.string(category.items.count, "item"))
                         .font(.system(size: 10))
                         .foregroundStyle(Theme.tertiaryText)
                 }
@@ -196,7 +201,7 @@ struct AutoCleanupSheet: View {
             Button("Delete \(ByteFormat.string(selectedBytes))", role: .destructive) { performClean() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(selectedItems.count) item(s) will be deleted immediately, bypassing the Trash. This can't be undone. These are regenerable caches and logs, but they won't be recoverable.")
+            Text("\(CountFormat.string(selectedItems.count, "item")) will be deleted immediately, bypassing the Trash. This can't be undone. These are regenerable caches and logs, but they won't be recoverable.")
         }
     }
 
@@ -235,7 +240,7 @@ struct AutoCleanupSheet: View {
     private var cleaning: some View {
         VStack(spacing: 16) {
             ProgressView().scaleEffect(1.3).tint(Theme.accent)
-            Text("Moving files to the Trash…")
+            Text(deletePermanently ? "Deleting files…" : "Moving files to the Trash…")
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.secondaryText)
         }
@@ -244,7 +249,7 @@ struct AutoCleanupSheet: View {
 
     // MARK: - Done
 
-    private func doneView(reclaimed: Int64, failed: Int) -> some View {
+    private func doneView(reclaimed: Int64, failed: Int, permanently: Bool) -> some View {
         VStack(spacing: 16) {
             Image(systemName: "checkmark.circle.fill")
                 .font(.system(size: 48))
@@ -252,9 +257,7 @@ struct AutoCleanupSheet: View {
             Text("Freed \(ByteFormat.string(reclaimed))")
                 .font(.system(size: 22, weight: .bold, design: .rounded))
                 .foregroundStyle(Theme.primaryText)
-            Text(failed == 0
-                 ? "Cleared files are in the Trash — restore any until you empty it."
-                 : "\(failed) item(s) couldn't be removed and were left in place.")
+            Text(Self.doneMessage(failed: failed, permanently: permanently))
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -268,10 +271,20 @@ struct AutoCleanupSheet: View {
         .padding(24)
     }
 
+    /// What the finished screen says. It must not promise the Trash after a
+    /// permanent delete — that is the one case where there is nothing to restore.
+    static func doneMessage(failed: Int, permanently: Bool) -> String {
+        let outcome = permanently
+            ? "The files were deleted permanently and can't be restored."
+            : "Cleared files are in the Trash — restore any until you empty it."
+        guard failed > 0 else { return outcome }
+        return "\(CountFormat.string(failed, "item")) couldn't be removed and \(failed == 1 ? "was" : "were") left in place. \(outcome)"
+    }
+
     // MARK: - Derived
 
     private var selectedItems: [JunkItem] {
-        cleanup.junkCategories
+        cleanup.autoCleanableJunkCategories
             .filter { selected.contains($0.id) }
             .flatMap { $0.items }
     }
@@ -289,9 +302,9 @@ struct AutoCleanupSheet: View {
 
     /// Selects every category by default the first time a non-empty scan arrives.
     private func seedSelectionIfNeeded(force: Bool = false) {
-        guard !cleanup.junkCategories.isEmpty else { return }
+        guard !cleanup.autoCleanableJunkCategories.isEmpty else { return }
         guard force || !didSeedSelection else { return }
-        selected = Set(cleanup.junkCategories.map(\.id))
+        selected = Set(cleanup.autoCleanableJunkCategories.map(\.id))
         didSeedSelection = true
     }
 
@@ -309,9 +322,10 @@ struct AutoCleanupSheet: View {
     private func performClean() {
         let items = selectedItems
         guard !items.isEmpty else { return }
+        let permanently = deletePermanently
         phase = .cleaning
-        cleanup.autoCleanJunk(items, permanently: deletePermanently) { reclaimed, failed in
-            phase = .done(reclaimed: reclaimed, failed: failed)
+        cleanup.autoCleanJunk(items, permanently: permanently) { reclaimed, failed in
+            phase = .done(reclaimed: reclaimed, failed: failed, permanently: permanently)
         }
     }
 }

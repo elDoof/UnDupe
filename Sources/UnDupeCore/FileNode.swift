@@ -75,6 +75,27 @@ public final class FileNode: Identifiable {
         return result
     }
 
+    /// The node at `path` at or beneath this one, or nil if the tree has no such
+    /// entry. Walks one path component at a time, so the cost is the depth of
+    /// the path rather than the size of the tree.
+    ///
+    /// Used to put the map back where it was after a rescan: the old nodes are
+    /// gone, but the folder the user was looking at usually still exists.
+    public func descendant(atPath path: String) -> FileNode? {
+        if path == self.path { return self }
+        let prefix = self.path.hasSuffix("/") ? self.path : self.path + "/"
+        guard path.hasPrefix(prefix) else { return nil }
+
+        var current = self
+        for component in path.dropFirst(prefix.count).split(separator: "/") {
+            guard let next = current.children.first(where: { $0.name == component }) else {
+                return nil
+            }
+            current = next
+        }
+        return current
+    }
+
     /// Removes this node from its parent and subtracts its size and file count
     /// from every ancestor. Called after a file is trashed so the visualization
     /// reflects the freed space without a full re-scan.

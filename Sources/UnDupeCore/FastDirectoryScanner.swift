@@ -47,14 +47,30 @@ public enum FastDirectoryScanner {
     /// define it here. (Same value as `<sys/stat.h>`'s `SF_DATALESS`.)
     private static let datalessFlag: UInt32 = 0x4000_0000
 
+    /// The result of reading one directory.
+    public struct Listing {
+        public let entries: [DirEntry]
+        /// False when the directory couldn't be opened, or a read failed before
+        /// the end. `entries` then holds whatever was read (possibly nothing),
+        /// and the caller should treat the directory's total as a lower bound.
+        public let isComplete: Bool
+    }
+
     /// Reads all entries in the directory at `path`.
     ///
     /// Returns an empty array (never throws) when the directory cannot be opened —
     /// e.g. permission denied. Callers treat inaccessible directories as empty so a
-    /// single locked folder never aborts the whole scan.
+    /// single locked folder never aborts the whole scan. Use `list(path:)` to
+    /// tell "empty" apart from "couldn't be read".
     public static func read(path: String) -> [DirEntry] {
+        list(path: path).entries
+    }
+
+    /// Reads all entries in the directory at `path`, reporting whether the
+    /// listing is complete.
+    public static func list(path: String) -> Listing {
         let fd = open(path, O_RDONLY, 0)
-        guard fd >= 0 else { return [] }
+        guard fd >= 0 else { return Listing(entries: [], isComplete: false) }
         defer { close(fd) }
 
         var attrList = attrlist()
@@ -69,15 +85,21 @@ public enum FastDirectoryScanner {
         defer { buffer.deallocate() }
 
         var entries: [DirEntry] = []
+        var isComplete = true
 
         while true {
             let count = getattrlistbulk(fd, &attrList, buffer, bufferSize, 0)
-            if count <= 0 { break }   // 0 == finished, -1 == error (treat as done)
+            if count == 0 { break }            // finished
+            if count < 0 {                     // error: keep what we have, but say so
+                isComplete = false
+                break
+            }
 
             var entryPtr = UnsafeRawPointer(buffer)
             for _ in 0..<count {
                 guard let parsed = parseEntry(at: entryPtr) else {
                     // Malformed entry: stop parsing this batch defensively.
+                    isComplete = false
                     break
                 }
                 entries.append(parsed.value)
@@ -85,7 +107,7 @@ public enum FastDirectoryScanner {
             }
         }
 
-        return entries
+        return Listing(entries: entries, isComplete: isComplete)
     }
 
     /// Parses a single entry beginning at `ptr`. Returns the decoded entry plus a

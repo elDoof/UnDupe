@@ -16,6 +16,10 @@ struct AppUninstallerView: View {
     /// Leftover paths the user chose to **keep** (everything else is removed).
     @State private var keptLeftovers: Set<String> = []
     @State private var confirmingUninstall = false
+    /// Bundle paths of apps that are running right now. Those can't be selected:
+    /// trashing a bundle out from under a live process leaves it half-working
+    /// until it's quit. `CleanupModel` checks again at the moment of removal.
+    @State private var runningPaths: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,22 +38,45 @@ struct AppUninstallerView: View {
                 content
             }
         }
-        .onAppear { if cleanup.installedApps.isEmpty { cleanup.loadApps() } }
+        .onAppear {
+            if cleanup.installedApps.isEmpty { cleanup.loadApps() }
+            refreshRunningApps()
+        }
         .onChange(of: cleanup.installedApps) { _ in
             selected.removeAll()
             expanded.removeAll()
             keptLeftovers.removeAll()
+            refreshRunningApps()
         }
+        // An app quit (or launched) while this list is open changes what can be
+        // selected, so follow it live rather than making the user reopen the screen.
+        .onReceive(Self.appLifecycleChanges) { _ in refreshRunningApps() }
         .confirmationDialog(
-            "Move \(selectedApps.count) app(s) to Trash?",
+            "Move \(CountFormat.string(selectedApps.count, "app")) to Trash?",
             isPresented: $confirmingUninstall,
             titleVisibility: .visible
         ) {
             Button("Move to Trash", role: .destructive) { performUninstall() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(selectedApps.count) app(s) and \(removedLeftoverCount) support file(s) — \(ByteFormat.string(removedBytes)) — will be moved to the Trash. Unchecked leftovers are kept. You can restore everything until you empty the Trash.")
+            Text("\(CountFormat.string(selectedApps.count, "app")) and \(CountFormat.string(removedLeftoverCount, "support file")) — \(ByteFormat.string(removedBytes)) — will be moved to the Trash. Unchecked leftovers are kept. You can restore everything until you empty the Trash.")
         }
+    }
+
+    private static let appLifecycleChanges = NSWorkspace.shared.notificationCenter
+        .publisher(for: NSWorkspace.didLaunchApplicationNotification)
+        .merge(with: NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didTerminateApplicationNotification))
+        .receive(on: DispatchQueue.main)
+
+    private func refreshRunningApps() {
+        runningPaths = CleanupModel.runningAppBundlePaths()
+        // Anything that started running since it was ticked comes off the list.
+        selected = selected.filter { !runningPaths.contains($0) }
+    }
+
+    private func isRunning(_ app: InstalledApp) -> Bool {
+        runningPaths.contains((app.bundlePath as NSString).standardizingPath)
     }
 
     private var content: some View {
@@ -77,7 +104,7 @@ struct AppUninstallerView: View {
     private var actionBar: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(uninstallableCount) of \(cleanup.installedApps.count) apps removable")
+                Text("\(uninstallableCount) of \(CountFormat.string(cleanup.installedApps.count, "app")) removable")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.primaryText)
                 Text("Apple apps are locked. Everything else goes to the Trash with its leftovers.")
@@ -108,7 +135,13 @@ struct AppUninstallerView: View {
         let isExpanded = expanded.contains(app.id)
         return VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                if app.canUninstall {
+                if app.canUninstall && isRunning(app) {
+                    Image(systemName: "circle.dashed")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.tertiaryText)
+                        .help("\(app.name) is running — quit it before uninstalling")
+                        .accessibilityLabel("\(app.name) is running and can't be selected")
+                } else if app.canUninstall {
                     Button { toggle(app) } label: {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .font(.system(size: 16))
@@ -133,6 +166,15 @@ struct AppUninstallerView: View {
                             .foregroundStyle(Theme.primaryText)
                             .lineLimit(1)
                         OwnerBadge(owner: app.owner)
+                        if app.canUninstall && isRunning(app) {
+                            Text("Running — quit to uninstall")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundStyle(Theme.danger)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Theme.danger.opacity(0.14)))
+                                .fixedSize()
+                        }
                         if let version = app.version {
                             Text("v\(version)")
                                 .font(.system(size: 10))
@@ -284,7 +326,7 @@ struct AppUninstallerView: View {
     // MARK: - Logic
 
     private func toggle(_ app: InstalledApp) {
-        guard app.canUninstall else { return }
+        guard app.canUninstall, !isRunning(app) else { return }
         if selected.contains(app.id) { selected.remove(app.id) }
         else { selected.insert(app.id) }
     }

@@ -71,6 +71,15 @@ public final class ScanEngine {
     /// read by worker threads. 0 if the root couldn't be stat'd.
     private var rootDeviceID: UInt64 = 0
 
+    /// Directories the last scan could not read (permission denied, or a read
+    /// that failed partway). Their contents are missing from the tree, so a
+    /// non-zero count means the totals are a lower bound. Read it after `scan`
+    /// returns.
+    public var skippedDirectoryCount: Int {
+        lock.lock(); defer { lock.unlock() }; return skippedDirectories
+    }
+    private var skippedDirectories = 0
+
     public init() {}
 
     /// Requests cancellation. Workers stop at the next directory boundary and the
@@ -106,6 +115,7 @@ public final class ScanEngine {
         cancelledFlag = false
         filesScanned = 0
         bytesScanned = 0
+        skippedDirectories = 0
         lastProgressReport = .distantPast
         lock.unlock()
         progressHandler = progress
@@ -120,7 +130,7 @@ public final class ScanEngine {
             size: 0
         )
 
-        let entries = FastDirectoryScanner.read(path: rootPath)
+        let entries = readEntries(at: rootPath)
         var topFiles: [DirEntry] = []
         var topDirs: [DirEntry] = []
         var opaqueDirs: [DirEntry] = []
@@ -199,7 +209,7 @@ public final class ScanEngine {
         let node = FileNode(name: name, path: path, isDirectory: true, size: 0)
         if isCancelled { return node }
 
-        let entries = FastDirectoryScanner.read(path: path)
+        let entries = readEntries(at: path)
         var children: [FileNode] = []
         var total: Int64 = 0
         var count = 0
@@ -243,6 +253,17 @@ public final class ScanEngine {
     }
 
     // MARK: - Helpers
+
+    /// Lists a directory, recording it as skipped when the listing is
+    /// incomplete. A cancelled scan is discarded wholesale, so nothing read
+    /// after cancellation is worth counting.
+    private func readEntries(at path: String) -> [DirEntry] {
+        let listing = FastDirectoryScanner.list(path: path)
+        if !listing.isComplete {
+            lock.lock(); skippedDirectories += 1; lock.unlock()
+        }
+        return listing.entries
+    }
 
     private func reportProgress(addFiles: Int, addBytes: Int64, path: String) {
         lock.lock()

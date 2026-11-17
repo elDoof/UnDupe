@@ -28,7 +28,7 @@ struct UpdateSheet: View {
                 Text("Software Update")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(Theme.primaryText)
-                Text(updates.currentVersion.map { "You have UnDupe \($0)" } ?? "UnDupe")
+                Text(updates.currentVersion.map { "You have UnDupe \($0.description)" } ?? "UnDupe")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.secondaryText)
             }
@@ -66,7 +66,7 @@ struct UpdateSheet: View {
     private func availableBody(_ release: Release) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Text("UnDupe \(release.version) is available.")
+                Text("UnDupe \(release.version.description) is available.")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Theme.primaryText)
                 Text(ByteFormat.string(release.assetSize))

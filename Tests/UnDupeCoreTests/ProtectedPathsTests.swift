@@ -48,6 +48,85 @@ final class ProtectedPathsTests: XCTestCase {
         XCTAssertFalse(ProtectedPaths.isDeletable("\(home)/Downloads/../../../usr/bin"))
     }
 
+    func testRefusesSystemConfigurationReachedThroughPrivate() {
+        // `standardizingPath` rewrites /private/etc → /etc and /private/var →
+        // /var whenever the shorter path exists, which used to slip these past
+        // the "/private" prefix entirely.
+        for path in ["/private/etc/hosts", "/etc/hosts", "/etc",
+                     "/private/var/db/dslocal", "/var/db/dslocal", "/var", "/private/var"] {
+            XCTAssertFalse(ProtectedPaths.isDeletable(path), "\(path) must be protected")
+        }
+    }
+
+    func testRefusesTheRootsEverythingElseHangsFrom() {
+        for path in ["/", "/Users", "/Volumes", "/tmp", "/private/tmp", "/var/folders"] {
+            XCTAssertFalse(ProtectedPaths.isDeletable(path), "\(path) must be protected")
+        }
+    }
+
+    func testRefusesAWholeVolumeButNotWhatIsOnIt() {
+        XCTAssertFalse(ProtectedPaths.isDeletable("/Volumes/Backup"))
+        XCTAssertFalse(ProtectedPaths.isDeletable("/Volumes/Backup/"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("/Volumes/Backup/Old Projects"))
+    }
+
+    func testRefusesTheUserLibraryAndItsTopLevelFolders() {
+        // Trashing ~/Library/Application Support wholesale would take every
+        // app's data with it; what the cleanup modules remove sits deeper.
+        for path in ["\(home)/Library",
+                     "\(home)/Library/Application Support",
+                     "\(home)/Library/Preferences",
+                     "\(home)/Library/Caches"] {
+            XCTAssertFalse(ProtectedPaths.isDeletable(path), "\(path) must be protected")
+        }
+        XCTAssertTrue(ProtectedPaths.isDeletable("\(home)/Library/Caches/com.example.app"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("\(home)/Library/Preferences/com.example.app.plist"))
+    }
+
+    func testStillAllowsScratchFilesUnderTheTemporaryRoots() {
+        // Per-user temp and cache space lives under /var/folders, and /tmp is
+        // scratch by definition — both are the user's to clear.
+        XCTAssertTrue(ProtectedPaths.isDeletable("/tmp/build-output.log"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("/private/tmp/build-output.log"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("/var/folders/ab/xyz/T/scratch.bin"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("/private/var/folders/ab/xyz/T/scratch.bin"))
+    }
+
+    func testSeesThroughASymlinkedFolderToTheProtectedPlaceBehindIt() throws {
+        // `/Volumes/Macintosh HD` is a symlink to `/` on a normal Mac, so a scan
+        // started there reports system files under a path no prefix rule matches.
+        // A symlink to `/` in a scratch folder reproduces that anywhere.
+        let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("UnDupeSymlinkTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scratch) }
+        let link = scratch.appendingPathComponent("BootDisk").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: "/")
+
+        XCTAssertFalse(ProtectedPaths.isDeletable("\(link)/usr/bin/true"))
+        XCTAssertFalse(ProtectedPaths.isDeletable("\(link)/Library/Preferences"))
+        XCTAssertFalse(ProtectedPaths.isDeletable("\(link)/System"))
+        // The link itself is just a file in a scratch folder: trashing it
+        // removes the link, not what it points at.
+        XCTAssertTrue(ProtectedPaths.isDeletable(link))
+    }
+
+    func testIgnoresLetterCaseBecauseTheFilesystemDoes() {
+        // APFS is case-insensitive by default: these are the same places.
+        for path in ["/library/Preferences/x.plist", "/SYSTEM/Library", "/users", "/volumes/Backup",
+                     "\(home)/Downloads/Thing.APP/Contents/Info.plist",
+                     "\(home.uppercased())/Library"] {
+            XCTAssertFalse(ProtectedPaths.isDeletable(path), "\(path) must be protected")
+        }
+        XCTAssertFalse(ProtectedPaths.isUninstallableApp("/Applications/undupe.app"))
+    }
+
+    func testRefusesEveryHomeFolderNotJustTheCurrentUsers() {
+        XCTAssertFalse(ProtectedPaths.isDeletable("/Users/someone-else"))
+        XCTAssertFalse(ProtectedPaths.isDeletable("/Users/Shared"))
+        XCTAssertTrue(ProtectedPaths.isDeletable("/Users/Shared/old-installer.dmg"))
+    }
+
     func testGivesAReasonExactlyWhenItRefuses() {
         XCTAssertNotNil(ProtectedPaths.refusalReason("/System"))
         XCTAssertNil(ProtectedPaths.refusalReason("\(home)/Downloads/big.zip"))

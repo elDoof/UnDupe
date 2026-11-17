@@ -50,6 +50,10 @@ struct ResultsView: View {
                 }
             }
             .overlay(alignment: .bottom) { statusToast }
+            .onAppear { restoreFocus(in: root) }
+            // Kept on the model so a rescan — from the toolbar or the menu bar —
+            // can come back to the folder being looked at.
+            .onChange(of: focusNode?.id) { _ in model.focusedPath = focusNode?.path }
             .onChange(of: model.trashedNodeIDs) { removed in
                 if let node = hovered, removed.contains(node.id) { hovered = nil }
                 if let node = selectedNode, removed.contains(node.id) { selectedNode = nil }
@@ -110,7 +114,9 @@ struct ResultsView: View {
             .fixedSize()
             .layoutPriority(1) // keep the tab switch fully visible
             .onChange(of: tab) { newTab in
-                if newTab == .duplicates && model.duplicates.isEmpty && !model.isFindingDuplicates {
+                // Once per scan. Keying this on an empty list re-ran the whole
+                // search every time the tab was opened after finding nothing.
+                if newTab == .duplicates && !model.hasSearchedDuplicates && !model.isFindingDuplicates {
                     model.findDuplicates()
                 }
             }
@@ -153,6 +159,7 @@ struct ResultsView: View {
 
             InspectorPanel(
                 node: hovered ?? selectedNode ?? focusNode ?? root,
+                trashBlock: { trashBlockReason(for: $0, root: root) },
                 onOpen: { node in
                     if node.isDirectory, !node.children.isEmpty {
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) { focusNode = node }
@@ -209,20 +216,21 @@ struct ResultsView: View {
             Text(ByteFormat.string(focus.size))
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(Theme.accent)
-            Text("\(focus.fileCount) files")
+            Text(CountFormat.string(focus.fileCount, "file"))
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.tertiaryText)
 
-            if !model.hasFullDiskAccess {
-                // The map is drawn from what the scan could actually read, so
-                // without the grant these totals are understated, not wrong-ish.
+            if model.skippedDirectoryCount > 0 {
+                // Driven by what the scan actually failed to read, not by the
+                // Full Disk Access probe: a readable folder shouldn't carry a
+                // warning, and a denied one should whatever the probe says.
                 Label("Totals incomplete", systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Theme.danger)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
                     .background(Capsule().fill(Theme.danger.opacity(0.14)))
-                    .help("UnDupe lacks Full Disk Access, so protected folders were skipped. Grant it in System Settings ▸ Privacy & Security.")
+                    .help(incompleteTotalsHelp)
                     .fixedSize()
             }
 
@@ -267,7 +275,7 @@ struct ResultsView: View {
 
     private func trashPrompt(for node: FileNode) -> String {
         if node.isDirectory {
-            return "\(ByteFormat.string(node.size)) · \(node.fileCount) files. The whole folder moves to the Trash — you can restore it from there."
+            return "\(ByteFormat.string(node.size)) · \(CountFormat.string(node.fileCount, "file")). The whole folder moves to the Trash — you can restore it from there."
         }
         return "\(ByteFormat.string(node.size)). You can restore it from the Trash."
     }
@@ -291,8 +299,8 @@ struct ResultsView: View {
                     }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 10)
-                .background(Capsule().fill(Theme.success.opacity(0.25)))
-                .overlay(Capsule().stroke(Theme.success.opacity(0.5), lineWidth: 1))
+                .background(Capsule().fill(toastTint.opacity(0.25)))
+                .overlay(Capsule().stroke(toastTint.opacity(0.5), lineWidth: 1))
                 .padding(.bottom, 18)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 // Re-armed whenever the message or the undo offer changes.
@@ -311,6 +319,38 @@ struct ResultsView: View {
     }
 
     // MARK: - Helpers
+
+    /// Green for "done", red for "didn't fully work".
+    private var toastTint: Color {
+        model.statusIsWarning ? Theme.danger : Theme.success
+    }
+
+    private var incompleteTotalsHelp: String {
+        let skipped = CountFormat.string(model.skippedDirectoryCount, "folder")
+        let cause = model.hasFullDiskAccess
+            ? "They may belong to another user or be locked."
+            : "Grant UnDupe Full Disk Access in System Settings ▸ Privacy & Security, then rescan."
+        return "\(skipped) couldn't be read, so their contents aren't counted. \(cause)"
+    }
+
+    /// Why `node` can't be trashed from here, or nil when it can. The scan root
+    /// gets its own answer: it is the map itself, and removing it would leave
+    /// the screen showing a tree that no longer exists.
+    private func trashBlockReason(for node: FileNode, root: FileNode) -> String? {
+        if node === root {
+            return "This is the folder you scanned. Trash it from Finder if you really mean to."
+        }
+        return ProtectedPaths.refusalReason(node.path)
+    }
+
+    /// After a rescan, zooms back into the folder that was open before it —
+    /// when it still exists and still has something in it to show.
+    private func restoreFocus(in root: FileNode) {
+        guard let path = model.takeFocusPathToRestore(),
+              let node = root.descendant(atPath: path),
+              node !== root, node.isDirectory, !node.children.isEmpty else { return }
+        focusNode = node
+    }
 
     private func ancestry(of node: FileNode, root: FileNode) -> [FileNode] {
         var chain: [FileNode] = []
@@ -342,7 +382,7 @@ struct ResultsView: View {
             open: { FileActions.open(target.path) },
             reveal: { FileActions.reveal(target.path) },
             copyPath: { FileActions.copyPath(target.path) },
-            trash: ProtectedPaths.isDeletable(target.path) ? { pendingTrash = target } : nil,
+            trash: trashBlockReason(for: target, root: root) == nil ? { pendingTrash = target } : nil,
             goUp: focus !== root ? focus.parent.map { parent in
                 { withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { focusNode = parent } }
             } : nil
@@ -355,6 +395,9 @@ struct ResultsView: View {
 /// Right-hand details panel for the hovered/focused node.
 private struct InspectorPanel: View {
     let node: FileNode
+    /// Why a node can't be trashed, or nil when it can. Supplied by the host so
+    /// the panel, the menus and the keyboard shortcut all give one answer.
+    let trashBlock: (FileNode) -> String?
     let onOpen: (FileNode) -> Void
     let onSelect: (FileNode) -> Void
     let onReveal: (FileNode) -> Void
@@ -383,7 +426,9 @@ private struct InspectorPanel: View {
 
             HStack(spacing: 18) {
                 stat(ByteFormat.string(node.size), "size")
-                if node.isDirectory { stat("\(node.fileCount)", "files") }
+                if node.isDirectory {
+                    stat(CountFormat.number(node.fileCount), CountFormat.noun(node.fileCount, "file"))
+                }
             }
 
             HStack(spacing: 10) {
@@ -397,8 +442,8 @@ private struct InspectorPanel: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(Theme.danger)
-                .disabled(!ProtectedPaths.isDeletable(node.path))
-                .help(ProtectedPaths.refusalReason(node.path) ?? "Move this item to the Trash")
+                .disabled(trashBlock(node) != nil)
+                .help(trashBlock(node) ?? "Move this item to the Trash")
             }
             .controlSize(.small)
             .contextMenu { menu(for: node) }
@@ -480,9 +525,8 @@ private struct InspectorPanel: View {
                     .foregroundStyle(Theme.danger)
             }
             .buttonStyle(.plain)
-            .disabled(!ProtectedPaths.isDeletable(child.path))
-            .help(ProtectedPaths.refusalReason(child.path)
-                  ?? "Move “\(child.name)” to Trash")
+            .disabled(trashBlock(child) != nil)
+            .help(trashBlock(child) ?? "Move “\(child.name)” to Trash")
         }
         .hoverHighlight(cornerRadius: 8)
         .help(child.path)
@@ -500,6 +544,8 @@ private struct InspectorPanel: View {
             onOpenInMap: node.isDirectory && !node.children.isEmpty
                 ? { onSelect(node); onOpen(node) }
                 : nil,
+            // Covers the scan root, which `ProtectedPaths` alone would allow.
+            extraTrashBlock: trashBlock(node),
             onReveal: { onReveal(node) },
             onTrash: { onTrash(node) }
         )

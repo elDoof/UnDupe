@@ -34,6 +34,13 @@ synchronous recursion. Progress is reported from worker threads and throttled to
 30 ms, so callers must hop to the main queue themselves. Cancellation is a locked
 flag checked at directory boundaries.
 
+A directory that can't be opened, or whose read fails partway, is not silently
+treated as empty: `FastDirectoryScanner.list` reports the listing as incomplete,
+`ScanEngine` counts it, and the results screen shows "Totals incomplete" with
+the number of folders skipped. The warning is driven by what the scan actually
+failed to read rather than by the Full Disk Access probe, so a fully readable
+folder carries no warning and a denied one always does.
+
 Only directories and regular files become nodes. FIFOs, sockets and device files
 are skipped — a later hashing read on one can block forever on a foreign-formatted
 external drive.
@@ -85,6 +92,22 @@ drains per 1 MB chunk. Without that, a parallel group of large media files
 accumulates every autoreleased `FileHandle` chunk until the group finishes — the
 cause of a memory blow-up on external drives that was measured in tens of GB.
 
+A read that fails partway yields **no hash**, not a hash of what was read so far.
+Treating the failure as end-of-file would make two files that both fail at the
+same offset — a dying disk, a share that dropped — compare equal and be offered
+as verified duplicates.
+
+Progress counts every candidate exactly once, when its fate is settled. Most are
+settled at the prefix stage and never reach the full hash, so counting only the
+survivors would leave the bar well short of its total.
+
+The rules for *which* copies get trashed live in `DuplicateSelection`, in the
+engine rather than in the view that draws the checkboxes, so every route to the
+Trash is held to them. The default keeps the copy with the shortest path. Before
+a batch trash, each set is checked against the disk: the list is a snapshot from
+when the search ran, and if the copy a set was going to keep has since vanished,
+the set is left alone rather than losing what is now its last copy.
+
 ## Deleting safely
 
 `SafeDelete` is the only code in the project that removes anything, and
@@ -93,9 +116,29 @@ goes through both.
 
 - Removal is always `FileManager.trashItem`, never `unlink`.
 - `ProtectedPaths` refuses `/System`, `/Library`, `/Applications`, `/usr`, bundle
-  internals, the home root, and more.
-- A set of duplicates never loses its last remaining copy — enforced in the
-  selection model, not just the dialog.
+  internals, the home root, and more. It also refuses the roots everything else
+  hangs from — `/`, `/Users`, `/Volumes`, a whole mounted volume, and `~/Library`
+  together with the folders directly inside it — so the UI never offers a Trash
+  action that could only fail, or one that would take every app's data with it.
+- Paths are folded to one spelling before any rule is applied.
+  `standardizingPath` drops a leading `/private` only when the shorter path
+  exists, which used to let `/private/etc/…` and `/private/var/…` slip past the
+  `/private` rule as `/etc/…` and `/var/…`. `/tmp` and `/var/folders` are the
+  exceptions: the roots are refused, their contents (scratch and per-user
+  temporary files) are not.
+- A set of duplicates never loses its last remaining copy — enforced in
+  `DuplicateSelection`, not just the dialog, and re-checked against the disk
+  immediately before trashing.
+- The results screen additionally refuses to trash the folder that was scanned:
+  it is the map itself.
+
+The App Uninstaller builds the paths it removes from two strings in the app's own
+`Info.plist` — the bundle identifier and the display name. Both are untrusted
+input sitting directly upstream of a delete, so each must be a plain path
+component (no separators, not empty, not `.` or `..`), and every candidate must
+then resolve to a direct child of the `~/Library` folder it was built for. Group
+containers match on the whole identifier, never a substring. An app that is
+running is not offered for uninstall until it is quit.
 
 There are exactly two deliberate carve-outs, and both are narrow:
 
@@ -109,7 +152,9 @@ live under `~/Library` and pass the normal guard.
 **Permanent deletion.** `SafeDelete.deletePermanently` skips the Trash. It is
 reachable only from the Automatic Cleanup sheet's opt-in switch, is confined to
 the allowlisted regenerable caches and logs, is default-off, and still runs the
-`ProtectedPaths` guard.
+`ProtectedPaths` guard. Each junk category carries `isAutoCleanable`; Xcode
+Archives are listed for review but are not regenerable, so they are excluded
+from Automatic Cleanup entirely and can only go to the Trash.
 
 Deletion is also **undoable for one step**. `TrashResult` records where an item
 landed in the Trash (`trashItem(at:resultingItemURL:)`), `SafeDelete.putBack`
@@ -179,6 +224,18 @@ work runs on `DispatchQueue.global`, and **every `@Published` mutation is wrappe
 in `DispatchQueue.main.async`**. Because `FileNode` is a reference type whose
 mutations aren't observable, the models call `objectWillChange.send()` by hand
 after mutating the tree.
+
+Background work can finish after the thing it belongs to has been replaced: a
+cancelled scan still completes, late, and a duplicate search can outlive a
+rescan. `AppModel` keeps a reference to the current `ScanEngine` and
+`DuplicateFinder` and drops any progress or completion that comes from a
+different instance. Without that check a cancelled scan's late result sends the
+user back to the home screen in the middle of the next scan.
+
+System tools (`launchctl`, `pluginkit`, `hdiutil`) are run through one helper,
+`ProcessRunner`, which discards stderr, closes stdin and enforces a deadline. An
+unread stderr pipe blocks the child once it fills, and these calls sit behind
+spinners that would otherwise never stop.
 
 ## Build and distribution
 

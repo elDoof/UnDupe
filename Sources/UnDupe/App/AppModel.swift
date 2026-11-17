@@ -9,6 +9,8 @@ struct Volume: Identifiable, Hashable {
     let path: String
     let totalBytes: Int64
     let availableBytes: Int64
+    /// Built into the Mac rather than plugged in — only affects the icon.
+    var isInternal = false
     var usedBytes: Int64 { max(0, totalBytes - availableBytes) }
 }
 
@@ -43,19 +45,37 @@ final class AppModel: ObservableObject {
     // Scan progress
     @Published private(set) var scanFiles: Int = 0
     @Published private(set) var scanBytes: Int64 = 0
+    /// The folder being read right now. Changes many times a second.
     @Published private(set) var scanningPath: String = ""
+    /// The folder the user asked to scan. Stable for the whole scan, which is
+    /// what a headline needs.
+    @Published private(set) var scanRootPath: String = ""
+
+    /// Folders the finished scan could not read. Non-zero means the totals on
+    /// screen are a lower bound, and the UI says so.
+    @Published private(set) var skippedDirectoryCount = 0
 
     // Duplicates
     @Published private(set) var duplicates: [DuplicateGroup] = []
     @Published private(set) var isFindingDuplicates = false
+    /// Whether a duplicate search has finished for the current scan. Without it
+    /// "no duplicates" and "haven't looked yet" are both an empty list, and the
+    /// search silently re-ran every time the tab was opened.
+    @Published private(set) var hasSearchedDuplicates = false
     @Published private(set) var dupHashed: Int = 0
     @Published private(set) var dupTotal: Int = 0
+    /// Ids of the duplicate copies marked for the Trash. Held here rather than
+    /// in the view so it survives switching between the map and the list.
+    @Published private(set) var markedDuplicateIDs: Set<UUID> = []
 
     /// Includes descendants so cached map shapes cannot act on removed items.
     @Published private(set) var trashedNodeIDs: Set<UUID> = []
 
     // One-shot feedback after a trash action.
     @Published var statusMessage: String?
+    /// True when `statusMessage` reports something that didn't fully work, so
+    /// the toast doesn't dress a failure in success green.
+    @Published private(set) var statusIsWarning = false
 
     /// Whether the last trash can still be put back. Drives the Undo affordance
     /// on the status toast and the Edit ▸ Undo menu item.
@@ -69,8 +89,17 @@ final class AppModel: ObservableObject {
     /// still succeeds but silently under-reports, so the UI has to say so.
     @Published private(set) var hasFullDiskAccess: Bool = FullDiskAccess.isGranted()
 
+    /// The folder the map is zoomed into, kept up to date by the results screen
+    /// so a rescan (including one from the menu bar) can come back to it.
+    var focusedPath: String?
+
+    /// The scan in flight, or the one whose results are on screen. Completions
+    /// and progress from any *other* engine are stale and are dropped — see
+    /// `startScan`.
     private var scanEngine: ScanEngine?
     private var dupFinder: DuplicateFinder?
+    /// Where the next results screen should zoom to, set by a rescan.
+    private var focusPathToRestore: String?
 
     /// Everything needed to reverse the most recent trash. Single level by
     /// design: a second trash replaces it rather than building a stack, which
@@ -92,12 +121,19 @@ final class AppModel: ObservableObject {
 
     var totalReclaimable: Int64 { duplicates.reduce(0) { $0 + $1.reclaimableBytes } }
 
+    /// True only while a finished scan is on screen. Rescan and Undo are
+    /// meaningless anywhere else, and Rescan during a scan would start a second.
+    var isShowingResults: Bool {
+        topLevel == .disk && phase == .results && selectedRoot != nil
+    }
+
     // MARK: - Volumes
 
     func availableVolumes() -> [Volume] {
         let keys: [URLResourceKey] = [
             .volumeNameKey, .volumeTotalCapacityKey,
             .volumeAvailableCapacityKey, .volumeIsBrowsableKey,
+            .volumeIsInternalKey,
         ]
         let urls = FileManager.default.mountedVolumeURLs(
             includingResourceValuesForKeys: keys,
@@ -114,7 +150,8 @@ final class AppModel: ObservableObject {
                     name: values.volumeName ?? url.lastPathComponent,
                     path: url.path,
                     totalBytes: Int64(values.volumeTotalCapacity ?? 0),
-                    availableBytes: Int64(values.volumeAvailableCapacity ?? 0)
+                    availableBytes: Int64(values.volumeAvailableCapacity ?? 0),
+                    isInternal: values.volumeIsInternal ?? false
                 )
             )
         }
@@ -129,32 +166,53 @@ final class AppModel: ObservableObject {
 
     // MARK: - Scanning
 
-    func startScan(path: String) {
+    /// Starts scanning `path`, replacing whatever was scanned before.
+    ///
+    /// - Parameter restoringFocus: a folder to zoom back into once the results
+    ///   appear, used by `rescan` so a refresh doesn't lose the user's place.
+    func startScan(path: String, restoringFocus: String? = nil) {
+        // Anything still running belongs to the tree we're about to discard.
+        scanEngine?.cancel()
+        cancelDuplicateSearch()
+
         let engine = ScanEngine()
         scanEngine = engine
 
         scanFiles = 0
         scanBytes = 0
         scanningPath = path
+        scanRootPath = path
         scanError = nil
+        skippedDirectoryCount = 0
         duplicates = []
+        hasSearchedDuplicates = false
+        markedDuplicateIDs = []
+        focusPathToRestore = restoringFocus
+        focusedPath = nil
         // The pending undo refers to nodes in the tree we're about to discard;
         // reattaching them afterwards would splice orphans into nothing.
         lastTrash = nil
         trashedNodeIDs = []
+        statusMessage = nil
         phase = .scanning
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome = engine.scan(rootPath: path) { progress in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    // A superseded scan keeps reporting until it unwinds; its
+                    // numbers must not overwrite the current scan's.
+                    guard let self, self.scanEngine === engine else { return }
                     self.scanFiles = progress.filesScanned
                     self.scanBytes = progress.bytesScanned
                     self.scanningPath = progress.currentPath
                 }
             }
+            let skipped = engine.skippedDirectoryCount
             DispatchQueue.main.async {
-                guard let self else { return }
+                // Cancelling scan A and starting B means A still finishes, late,
+                // as `.cancelled`. Acting on it would throw the user back to the
+                // home screen in the middle of B.
+                guard let self, self.scanEngine === engine else { return }
                 switch outcome {
                 case .cancelled:
                     self.phase = .home
@@ -170,6 +228,8 @@ final class AppModel: ObservableObject {
                     // "compare another drive" action would append on its own path.
                     self.roots = [root]
                     self.selectedRoot = root
+                    self.skippedDirectoryCount = skipped
+                    self.hasFullDiskAccess = FullDiskAccess.isGranted()
                     self.phase = .results
                 }
             }
@@ -178,6 +238,13 @@ final class AppModel: ObservableObject {
 
     func cancelScan() {
         scanEngine?.cancel()
+    }
+
+    /// The folder the results screen should open zoomed into, if a rescan asked
+    /// for one. Returned once, then forgotten.
+    func takeFocusPathToRestore() -> String? {
+        defer { focusPathToRestore = nil }
+        return focusPathToRestore
     }
 
     // MARK: - Top-level navigation
@@ -198,13 +265,28 @@ final class AppModel: ObservableObject {
         topLevel = .picker
     }
 
+    /// File ▸ New Scan: discards any results and shows the target chooser,
+    /// wherever in the app the user currently is.
+    func startNewScan() {
+        reset()
+        topLevel = .disk
+    }
+
     /// Discards all results and returns to the start screen.
     func reset() {
         scanEngine?.cancel()
-        dupFinder?.cancel()
+        // Dropping the reference is what makes the cancelled scan's late
+        // completion a no-op rather than a second trip home.
+        scanEngine = nil
+        cancelDuplicateSearch()
         roots = []
         selectedRoot = nil
         duplicates = []
+        hasSearchedDuplicates = false
+        markedDuplicateIDs = []
+        skippedDirectoryCount = 0
+        focusPathToRestore = nil
+        focusedPath = nil
         lastTrash = nil
         trashedNodeIDs = []
         phase = .home
@@ -215,8 +297,8 @@ final class AppModel: ObservableObject {
     /// Re-runs the scan on the folder currently being shown. The map is a
     /// snapshot, so this is how the user picks up changes made outside UnDupe.
     func rescan() {
-        guard let root = selectedRoot else { return }
-        startScan(path: root.path)
+        guard isShowingResults, let root = selectedRoot else { return }
+        startScan(path: root.path, restoringFocus: focusedPath)
     }
 
     /// Re-probes the Full Disk Access grant. Cheap, and worth doing whenever the
@@ -240,17 +322,42 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let groups = finder.find(in: rootsSnapshot) { progress in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, self.dupFinder === finder else { return }
                     self.dupHashed = progress.filesHashed
                     self.dupTotal = progress.totalToHash
                 }
             }
             DispatchQueue.main.async {
-                guard let self else { return }
+                // A search that was cancelled, or that belongs to a tree since
+                // replaced by a rescan, must not install its groups: they would
+                // point at nodes the map no longer shows.
+                guard let self, self.dupFinder === finder else { return }
+                self.dupFinder = nil
                 self.duplicates = groups
+                self.markedDuplicateIDs = DuplicateSelection.defaultMarks(for: groups)
                 self.isFindingDuplicates = false
+                self.hasSearchedDuplicates = true
             }
         }
+    }
+
+    /// Stops a duplicate search in progress. The list is left as "not searched"
+    /// rather than "no duplicates", so the screen offers to start again.
+    func cancelDuplicateSearch() {
+        dupFinder?.cancel()
+        dupFinder = nil
+        isFindingDuplicates = false
+    }
+
+    /// Flips one copy between "keep" and "trash". Marking the last kept copy of
+    /// a set is refused by `DuplicateSelection`.
+    func toggleDuplicateMark(_ file: FileNode, in group: DuplicateGroup) {
+        markedDuplicateIDs = DuplicateSelection.toggling(file, in: group, marked: markedDuplicateIDs)
+    }
+
+    /// Back to the default: keep one copy of each set, mark the rest.
+    func resetDuplicateSelection() {
+        markedDuplicateIDs = DuplicateSelection.defaultMarks(for: duplicates)
     }
 
     // MARK: - Trashing
@@ -260,13 +367,60 @@ final class AppModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let results = SafeDelete.moveToTrash(files)
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.applyTrashResults(results, files: files)
+                self?.applyTrashResults(results, files: files)
             }
         }
     }
 
-    private func applyTrashResults(_ results: [TrashResult], files: [FileNode]) {
+    /// Trashes every marked duplicate, set by set.
+    ///
+    /// The list is a snapshot from when the search ran, so each set is checked
+    /// against the disk first: if the copy it was going to keep is gone, the
+    /// set is left alone rather than losing its last copy.
+    func trashMarkedDuplicates() {
+        let groups = duplicates
+        let marked = markedDuplicateIDs
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let plan = DuplicateSelection.trashPlan(for: groups, marked: marked) {
+                FileManager.default.fileExists(atPath: $0)
+            }
+            let results = SafeDelete.moveToTrash(plan.files)
+            DispatchQueue.main.async {
+                self?.applyTrashResults(results, files: plan.files,
+                                        skippedSetCount: plan.skippedGroupCount)
+            }
+        }
+    }
+
+    /// Trashes a single duplicate (the right-click path), under the same rule
+    /// as the batch: another copy must still exist on disk.
+    func trashDuplicate(_ file: FileNode, in group: DuplicateGroup) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let hasOtherCopy = DuplicateSelection.hasOtherCopyOnDisk(than: file, in: group) {
+                FileManager.default.fileExists(atPath: $0)
+            }
+            guard hasOtherCopy else {
+                DispatchQueue.main.async {
+                    self?.showStatus(
+                        "Kept “\(file.name)” — the other copies in its set are no longer on disk.",
+                        isWarning: true
+                    )
+                }
+                return
+            }
+            let results = SafeDelete.moveToTrash([file])
+            DispatchQueue.main.async {
+                self?.applyTrashResults(results, files: [file])
+            }
+        }
+    }
+
+    private func showStatus(_ message: String, isWarning: Bool = false) {
+        statusIsWarning = isWarning
+        statusMessage = message
+    }
+
+    private func applyTrashResults(_ results: [TrashResult], files: [FileNode], skippedSetCount: Int = 0) {
         let succeeded = results.filter { $0.success }
         let succeededPaths = Set(succeeded.map { $0.path })
         let reclaimed = results.reduce(0) { $0 + $1.reclaimedBytes }
@@ -295,15 +449,36 @@ final class AppModel: ObservableObject {
 
         objectWillChange.send()   // FileNode mutations aren't observable on their own
 
+        // Undo always refers to the action the toast is describing. A trash
+        // that moved nothing therefore clears it: offering "Undo" beside
+        // "Nothing was moved" would quietly reverse some earlier trash instead.
         lastTrash = succeeded.isEmpty
             ? nil
             : TrashUndo(results: succeeded, detached: detached, duplicates: duplicatesBeforeTrash)
 
-        if failures.isEmpty {
-            statusMessage = "Moved \(succeededPaths.count) item(s) to Trash — freed \(ByteFormat.string(reclaimed))."
+        showStatus(
+            Self.trashSummary(moved: succeeded.count, reclaimed: reclaimed,
+                              failed: failures.count, skippedSets: skippedSetCount),
+            isWarning: !failures.isEmpty || skippedSetCount > 0
+        )
+    }
+
+    /// The one-line result of a trash, covering what moved, what was refused,
+    /// and any duplicate sets left alone because their kept copy had vanished.
+    static func trashSummary(moved: Int, reclaimed: Int64, failed: Int, skippedSets: Int) -> String {
+        var parts: [String] = []
+        if moved > 0 {
+            parts.append("Moved \(CountFormat.string(moved, "item")) to Trash — freed \(ByteFormat.string(reclaimed)).")
         } else {
-            statusMessage = "Freed \(ByteFormat.string(reclaimed)). \(failures.count) item(s) couldn't be removed (protected or in use)."
+            parts.append("Nothing was moved to the Trash.")
         }
+        if failed > 0 {
+            parts.append("\(CountFormat.string(failed, "item")) couldn't be removed (protected or in use).")
+        }
+        if skippedSets > 0 {
+            parts.append("Left \(CountFormat.string(skippedSets, "set")) alone: the copy to keep is no longer on disk.")
+        }
+        return parts.joined(separator: " ")
     }
 
     private func markTrashed(_ node: FileNode, removed: Bool) {
@@ -348,13 +523,19 @@ final class AppModel: ObservableObject {
 
         objectWillChange.send()
 
+        let restoredCount = CountFormat.string(restoredPaths.count, "item")
         if failures.isEmpty {
-            statusMessage = "Put \(restoredPaths.count) item(s) back — \(ByteFormat.string(putBack)) restored."
+            showStatus("Put \(restoredCount) back — \(ByteFormat.string(putBack)) restored.")
         } else if restoredPaths.isEmpty {
-            statusMessage = failures.first?.error
-                ?? "Nothing could be put back — the Trash may have been emptied."
+            showStatus(
+                failures.first?.error ?? "Nothing could be put back — the Trash may have been emptied.",
+                isWarning: true
+            )
         } else {
-            statusMessage = "Put \(restoredPaths.count) item(s) back. \(failures.count) couldn't be restored."
+            showStatus(
+                "Put \(restoredCount) back. \(CountFormat.string(failures.count, "item")) couldn't be restored.",
+                isWarning: true
+            )
         }
     }
 }

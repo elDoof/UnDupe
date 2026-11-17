@@ -14,6 +14,10 @@ public struct JunkCategory: Identifiable, Hashable, Sendable {
     public let name: String
     public let explanation: String
     public let items: [JunkItem]
+    /// Whether the one-click Automatic Cleanup may include this category.
+    /// False for anything that can't simply be rebuilt on demand: it is still
+    /// listed for review, but never pre-selected and never deleted permanently.
+    public let isAutoCleanable: Bool
     public var totalBytes: Int64 { items.reduce(0) { $0 + $1.sizeBytes } }
 }
 
@@ -31,12 +35,14 @@ public enum JunkScanner {
         let name: String
         let explanation: String
         let candidates: [Candidate]
+        var isAutoCleanable = true
     }
 
     // MARK: - Scan
 
-    public static func scan() -> [JunkCategory] {
-        let home = NSHomeDirectory()
+    /// - Parameter home: the home directory to look under. A parameter so the
+    ///   allowlist can be tested against a scratch directory.
+    public static func scan(home: String = NSHomeDirectory()) -> [JunkCategory] {
         let groups: [Group] = [
             Group(
                 name: "User Caches",
@@ -50,13 +56,23 @@ public enum JunkScanner {
             ),
             Group(
                 name: "Xcode & Developer",
-                explanation: "Derived data, archives, and device support — large and regenerable.",
+                explanation: "Derived data and device support — large and regenerable.",
                 candidates: existing([
                     Candidate(name: "Derived Data", path: "\(home)/Library/Developer/Xcode/DerivedData"),
-                    Candidate(name: "Archives", path: "\(home)/Library/Developer/Xcode/Archives"),
                     Candidate(name: "iOS DeviceSupport", path: "\(home)/Library/Developer/Xcode/iOS DeviceSupport"),
                     Candidate(name: "Simulator Caches", path: "\(home)/Library/Developer/CoreSimulator/Caches"),
                 ])
+            ),
+            // Kept apart from the regenerable developer junk on purpose: an
+            // archive is the shipped build plus the debug symbols needed to
+            // read its crash reports, and nothing rebuilds either.
+            Group(
+                name: "Xcode Archives",
+                explanation: "Archived builds and their debug symbols. These can't be regenerated — remove only what you no longer need to ship or symbolicate.",
+                candidates: existing([
+                    Candidate(name: "Archives", path: "\(home)/Library/Developer/Xcode/Archives"),
+                ]),
+                isAutoCleanable: false
             ),
         ]
 
@@ -73,7 +89,12 @@ public enum JunkScanner {
                 }
                 .sorted { $0.sizeBytes > $1.sizeBytes }
             guard !items.isEmpty else { return nil }
-            return JunkCategory(name: group.name, explanation: group.explanation, items: items)
+            return JunkCategory(
+                name: group.name,
+                explanation: group.explanation,
+                items: items,
+                isAutoCleanable: group.isAutoCleanable
+            )
         }
     }
 

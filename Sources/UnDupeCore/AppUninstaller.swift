@@ -129,25 +129,52 @@ public enum AppUninstaller {
 
     // MARK: - Leftovers
 
-    /// A candidate leftover before it's been confirmed to exist and sized.
-    private struct LeftoverCandidate { let category: String; let path: String }
+    /// A candidate leftover before it's been confirmed to exist and sized: one
+    /// entry named `name` directly inside the `~/Library` subfolder `folder`.
+    private struct LeftoverCandidate {
+        let category: String
+        let folder: String
+        let name: String
 
-    private static func findLeftovers(bundleID: String?, appName: String) -> [AppLeftover] {
-        let home = NSHomeDirectory()
+        func path(home: String) -> String { "\(home)/Library/\(folder)/\(name)" }
+    }
+
+    /// Whether `token` is safe to use as a single path component.
+    ///
+    /// The bundle identifier and display name come out of the app's own
+    /// `Info.plist`, which makes them untrusted input: an identifier of
+    /// `../../Documents` would otherwise turn `~/Library/Caches/<id>` into the
+    /// user's Documents folder, and an empty display name would turn
+    /// `~/Library/Application Support/<name>` into the whole folder. Anything
+    /// that isn't a plain name is refused outright rather than cleaned up.
+    static func isSafePathToken(_ token: String) -> Bool {
+        guard !token.isEmpty, token != ".", token != ".." else { return false }
+        guard !token.contains("/") else { return false }
+        return token.unicodeScalars.allSatisfy { !CharacterSet.controlCharacters.contains($0) }
+    }
+
+    /// Support files under `home`'s Library that belong to the app with this
+    /// bundle identifier and display name. `home` is a parameter so the matching
+    /// rules can be tested against a scratch directory.
+    static func findLeftovers(
+        bundleID: String?,
+        appName: String,
+        home: String = NSHomeDirectory()
+    ) -> [AppLeftover] {
         var candidates: [LeftoverCandidate] = []
 
         // Bundle-identifier-keyed locations (exact, collision-free).
-        if let id = bundleID, !id.isEmpty {
+        if let id = bundleID, isSafePathToken(id) {
             candidates += [
-                LeftoverCandidate(category: "Preferences", path: "\(home)/Library/Preferences/\(id).plist"),
-                LeftoverCandidate(category: "Caches", path: "\(home)/Library/Caches/\(id)"),
-                LeftoverCandidate(category: "Application Support", path: "\(home)/Library/Application Support/\(id)"),
-                LeftoverCandidate(category: "Containers", path: "\(home)/Library/Containers/\(id)"),
-                LeftoverCandidate(category: "Logs", path: "\(home)/Library/Logs/\(id)"),
-                LeftoverCandidate(category: "Saved State", path: "\(home)/Library/Saved Application State/\(id).savedState"),
-                LeftoverCandidate(category: "HTTP Storage", path: "\(home)/Library/HTTPStorages/\(id)"),
-                LeftoverCandidate(category: "WebKit Data", path: "\(home)/Library/WebKit/\(id)"),
-                LeftoverCandidate(category: "Cookies", path: "\(home)/Library/Cookies/\(id).binarycookies"),
+                LeftoverCandidate(category: "Preferences", folder: "Preferences", name: "\(id).plist"),
+                LeftoverCandidate(category: "Caches", folder: "Caches", name: id),
+                LeftoverCandidate(category: "Application Support", folder: "Application Support", name: id),
+                LeftoverCandidate(category: "Containers", folder: "Containers", name: id),
+                LeftoverCandidate(category: "Logs", folder: "Logs", name: id),
+                LeftoverCandidate(category: "Saved State", folder: "Saved Application State", name: "\(id).savedState"),
+                LeftoverCandidate(category: "HTTP Storage", folder: "HTTPStorages", name: id),
+                LeftoverCandidate(category: "WebKit Data", folder: "WebKit", name: id),
+                LeftoverCandidate(category: "Cookies", folder: "Cookies", name: "\(id).binarycookies"),
             ]
 
             // Group Containers embed the bundle/team id in the folder name.
@@ -156,18 +183,25 @@ public enum AppUninstaller {
 
         // Display-name-keyed locations (apps commonly use the title here). Exact
         // folder match only — no substring matching, to avoid collisions.
-        candidates += [
-            LeftoverCandidate(category: "Application Support", path: "\(home)/Library/Application Support/\(appName)"),
-            LeftoverCandidate(category: "Logs", path: "\(home)/Library/Logs/\(appName)"),
-        ]
+        if isSafePathToken(appName) {
+            candidates += [
+                LeftoverCandidate(category: "Application Support", folder: "Application Support", name: appName),
+                LeftoverCandidate(category: "Logs", folder: "Logs", name: appName),
+            ]
+        }
 
         // Keep only the ones that exist, are deletable, and aren't duplicates.
+        // The direct-child check is a second line of defence behind
+        // `isSafePathToken`: whatever the name was, the resolved path must still
+        // sit immediately inside the folder it was built for.
         let fm = FileManager.default
         var seen = Set<String>()
-        let existing = candidates.filter { candidate in
-            guard seen.insert(candidate.path).inserted else { return false }
-            return fm.fileExists(atPath: candidate.path)
-                && ProtectedPaths.isDeletable(candidate.path)
+        let existing: [(category: String, path: String)] = candidates.compactMap { candidate in
+            let path = candidate.path(home: home)
+            guard seen.insert(path).inserted else { return nil }
+            guard isDirectChild(path, of: "\(home)/Library/\(candidate.folder)") else { return nil }
+            guard fm.fileExists(atPath: path), ProtectedPaths.isDeletable(path) else { return nil }
+            return (candidate.category, path)
         }
 
         let sizes = FileSizing.parallelSizes(existing.map(\.path))
@@ -176,14 +210,33 @@ public enum AppUninstaller {
             .sorted { $0.sizeBytes > $1.sizeBytes }
     }
 
-    /// Group-container folders whose name contains the bundle id (e.g.
-    /// `group.com.foo.bar` or `<TEAMID>.com.foo.bar`).
+    /// Whether `path` resolves to an entry immediately inside `parent`.
+    private static func isDirectChild(_ path: String, of parent: String) -> Bool {
+        let resolved = (path as NSString).standardizingPath
+        let resolvedParent = (parent as NSString).standardizingPath
+        return (resolved as NSString).deletingLastPathComponent == resolvedParent
+            && resolved != resolvedParent
+    }
+
+    /// Whether a Group Containers folder name belongs to `bundleID`: the id
+    /// itself, or the id behind a dotted prefix (`group.com.foo.bar`,
+    /// `<TEAMID>.com.foo.bar`). A plain substring test is not enough —
+    /// `com.foo.bar` is a substring of `group.com.foo.barista`, which is a
+    /// different app's data.
+    static func isGroupContainer(_ name: String, for bundleID: String) -> Bool {
+        if name == bundleID { return true }
+        // A one-word identifier isn't a real reverse-DNS id, and as a suffix it
+        // would match unrelated containers: `bar` ends `group.com.other.bar`.
+        guard bundleID.contains(".") else { return false }
+        return name.hasSuffix("." + bundleID)
+    }
+
     private static func groupContainers(matching bundleID: String, home: String) -> [LeftoverCandidate] {
-        let dir = "\(home)/Library/Group Containers"
-        let entries = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        let folder = "Group Containers"
+        let entries = (try? FileManager.default.contentsOfDirectory(atPath: "\(home)/Library/\(folder)")) ?? []
         return entries
-            .filter { $0.contains(bundleID) }
-            .map { LeftoverCandidate(category: "Group Containers", path: "\(dir)/\($0)") }
+            .filter { isGroupContainer($0, for: bundleID) }
+            .map { LeftoverCandidate(category: "Group Containers", folder: folder, name: $0) }
     }
 
     // MARK: - Uninstall

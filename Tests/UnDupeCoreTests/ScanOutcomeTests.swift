@@ -56,6 +56,50 @@ final class ScanOutcomeTests: XCTestCase {
         XCTAssertEqual(tree.fileCount, 1)
     }
 
+    func testCountsAnUnreadableSubfolderInsteadOfSilentlyShowingItEmpty() throws {
+        // Arrange: one readable folder, one the scanner is denied.
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("UnDupeSkippedTests-\(UUID().uuidString)")
+        let open = root.appendingPathComponent("open")
+        let locked = root.appendingPathComponent("locked")
+        for folder in [open, locked] {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try Data(repeating: 0x55, count: 4_096)
+                .write(to: folder.appendingPathComponent("file.bin"))
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: locked.path)
+        addTeardownBlock {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        try XCTSkipIf(getuid() == 0, "root ignores permission bits, so nothing is unreadable")
+
+        // Act
+        let engine = ScanEngine()
+        let outcome = engine.scan(rootPath: root.path) { _ in }
+
+        // Assert
+        let tree = try XCTUnwrap(outcome.tree)
+        XCTAssertEqual(engine.skippedDirectoryCount, 1)
+        XCTAssertEqual(tree.fileCount, 1, "only the readable folder's file should be counted")
+        XCTAssertNotNil(tree.children.first { $0.name == "locked" },
+                        "the unreadable folder should still appear in the tree")
+    }
+
+    func testAFullyReadableScanSkipsNothing() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("UnDupeSkippedTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: root.appendingPathComponent("a/b"), withIntermediateDirectories: true
+        )
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+
+        let engine = ScanEngine()
+        _ = engine.scan(rootPath: root.path) { _ in }
+
+        XCTAssertEqual(engine.skippedDirectoryCount, 0)
+    }
+
     func testEveryFailureExplainsItselfToTheUser() {
         for failure in [ScanFailure.pathNotFound, .notADirectory, .unreadable] {
             XCTAssertFalse(failure.message.isEmpty)

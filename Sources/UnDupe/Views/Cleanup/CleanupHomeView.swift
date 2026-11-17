@@ -77,7 +77,7 @@ struct CleanupHomeView: View {
                 .contentTransition(.numericText())
                 .animation(.easeOut(duration: 0.4), value: cleanup.reclaimableBytes)
 
-            Text("Safe-to-clear junk and app leftovers. Nothing is removed until you choose.")
+            Text("Caches, logs and developer junk that apps rebuild on demand. Nothing is removed until you choose.")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.secondaryText)
                 .multilineTextAlignment(.center)
@@ -91,7 +91,7 @@ struct CleanupHomeView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.accent)
-                .disabled(cleanup.junkBytes == 0)
+                .disabled(cleanup.autoCleanableJunkBytes == 0)
 
                 if cleanup.junkBytes > 0 {
                     Button { cleanup.open(.junk) } label: {

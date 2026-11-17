@@ -38,7 +38,10 @@ final class UpdateModel: ObservableObject {
 
     /// False for `swift run` and unsigned local builds, which can't verify or
     /// replace themselves. The menu item is hidden rather than left to fail.
-    var isSupported: Bool { UpdateService.isSelfUpdateSupported() }
+    ///
+    /// Computed once: it reads the bundle's code signature, and the menu asks
+    /// every time it re-evaluates. The answer can't change while running.
+    let isSupported = UpdateService.isSelfUpdateSupported()
 
     // MARK: - Checking
 

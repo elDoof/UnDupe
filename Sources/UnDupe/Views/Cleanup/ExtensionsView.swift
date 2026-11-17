@@ -37,7 +37,7 @@ struct ExtensionsView: View {
             Button("Move to Trash", role: .destructive) { performRemove() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(selectedItems.count) plugin(s) will be moved to the Trash. You can restore them until you empty it.")
+            Text("\(CountFormat.string(selectedItems.count, "plugin")) will be moved to the Trash. You can restore them until you empty it.")
         }
     }
 
@@ -213,7 +213,7 @@ struct ExtensionsView: View {
     }
 
     private var extensionsCountLabel: String {
-        let base = "\(shownExtensions.count) extensions"
+        let base = CountFormat.string(shownExtensions.count, "extension")
         return hiddenAppleCount > 0 ? "\(base) · \(hiddenAppleCount) Apple hidden" : base
     }
 

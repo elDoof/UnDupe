@@ -4,11 +4,13 @@ import UnDupeCore
 
 /// Review-first duplicate manager. Identical files are grouped; the user picks
 /// which copies to trash. We never let a group lose its last copy.
+///
+/// The selection itself lives in `AppModel` (and its rules in
+/// `DuplicateSelection`), so it survives a trip to the map and back and every
+/// route to the Trash is held to the same keep-one guarantee.
 struct DuplicatesView: View {
     @EnvironmentObject var model: AppModel
 
-    /// File ids marked for trashing (everything not marked is kept).
-    @State private var marked: Set<UUID> = []
     /// Drives the confirmation dialog for the batch trash.
     @State private var isConfirmingTrash = false
 
@@ -16,6 +18,8 @@ struct DuplicatesView: View {
         Group {
             if model.isFindingDuplicates {
                 findingState
+            } else if !model.hasSearchedDuplicates {
+                notSearchedState
             } else if model.duplicates.isEmpty {
                 emptyState
             } else {
@@ -23,19 +27,17 @@ struct DuplicatesView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onChange(of: model.duplicates.count) { _ in resetSelection() }
-        .onAppear { if marked.isEmpty { resetSelection() } }
         // Trashing several files at once is the most destructive thing this
         // screen does, so it gets the same confirmation the map's single-item
         // trash has always had.
         .confirmationDialog(
-            "Move \(markedReclaimable.count) item(s) to Trash?",
+            "Move \(CountFormat.string(markedFiles.count, "item")) to Trash?",
             isPresented: $isConfirmingTrash
         ) {
-            Button("Move to Trash", role: .destructive) { trashMarked() }
+            Button("Move to Trash", role: .destructive) { model.trashMarkedDuplicates() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("\(ByteFormat.string(markedReclaimableBytes)) will be reclaimed. Every set keeps at least one copy, and you can restore anything from the Trash.")
+            Text("\(ByteFormat.string(markedBytes)) will be reclaimed. Every set keeps at least one copy, and you can restore anything from the Trash.")
         }
     }
 
@@ -43,15 +45,45 @@ struct DuplicatesView: View {
 
     private var findingState: some View {
         VStack(spacing: 16) {
-            ProgressView().scaleEffect(1.3).tint(Theme.accent)
+            if model.dupTotal > 0 {
+                ProgressView(value: Double(model.dupHashed), total: Double(model.dupTotal))
+                    .tint(Theme.accent)
+                    .frame(width: 260)
+            } else {
+                ProgressView().scaleEffect(1.3).tint(Theme.accent)
+            }
             Text("Finding duplicates…")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(Theme.primaryText)
-            if model.dupTotal > 0 {
-                Text("Hashed \(model.dupHashed.formatted()) of \(model.dupTotal.formatted()) candidates")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.secondaryText)
-            }
+            Text(model.dupTotal > 0
+                 ? "Compared \(CountFormat.number(model.dupHashed)) of \(CountFormat.string(model.dupTotal, "candidate"))"
+                 : "Grouping files by size…")
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(Theme.secondaryText)
+            Button("Cancel") { model.cancelDuplicateSearch() }
+                .buttonStyle(.bordered)
+                .keyboardShortcut(.cancelAction)
+                .padding(.top, 4)
+        }
+    }
+
+    /// Shown when no search has finished for this scan — in practice, after the
+    /// user cancelled one. Opening the tab starts a search on its own.
+    private var notSearchedState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "doc.on.doc")
+                .font(.system(size: 36))
+                .foregroundStyle(Theme.secondaryText)
+            Text("Duplicates haven't been searched")
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(Theme.primaryText)
+            Text(floorNote)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.secondaryText)
+            Button("Find Duplicates") { model.findDuplicates() }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.accent)
+                .padding(.top, 4)
         }
     }
 
@@ -63,10 +95,22 @@ struct DuplicatesView: View {
             Text("No duplicates found")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(Theme.primaryText)
-            Text("Nothing redundant in what you scanned.")
+            Text("No two files share the same contents. \(floorNote)")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.secondaryText)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 380)
+            Button("Search Again") { model.findDuplicates() }
+                .buttonStyle(.bordered)
+                .padding(.top, 4)
+                .help("Compare the scanned files again")
         }
+    }
+
+    /// States the size floor wherever a result (or its absence) is reported, so
+    /// "no duplicates" is never read as "no duplicates of any size".
+    private var floorNote: String {
+        "Only files of \(ByteFormat.string(DuplicateFinder.defaultMinSize)) or more are compared."
     }
 
     private var resultsList: some View {
@@ -87,7 +131,7 @@ struct DuplicatesView: View {
     private var summaryBar: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(model.duplicates.count) duplicate sets")
+                Text(CountFormat.string(model.duplicates.count, "duplicate set"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.primaryText)
                 Text("Up to \(ByteFormat.string(model.totalReclaimable)) reclaimable")
@@ -95,10 +139,10 @@ struct DuplicatesView: View {
                     .foregroundStyle(Theme.secondaryText)
             }
             Spacer()
-            Text("\(markedReclaimable.count) selected · \(ByteFormat.string(markedReclaimableBytes))")
-                .font(.system(size: 11))
+            Text("\(CountFormat.number(markedFiles.count)) selected · \(ByteFormat.string(markedBytes))")
+                .font(.system(size: 11).monospacedDigit())
                 .foregroundStyle(Theme.secondaryText)
-            Button { resetSelection() } label: {
+            Button { model.resetDuplicateSelection() } label: {
                 Label("Reset", systemImage: "arrow.uturn.backward")
             }
             .buttonStyle(.bordered)
@@ -109,7 +153,7 @@ struct DuplicatesView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(Theme.danger)
-            .disabled(markedReclaimable.isEmpty)
+            .disabled(markedFiles.isEmpty)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -141,11 +185,11 @@ struct DuplicatesView: View {
     }
 
     private func fileRow(_ file: FileNode, in group: DuplicateGroup) -> some View {
-        let isMarked = marked.contains(file.id)
-        let isLastKept = !isMarked && keptCount(in: group) == 1
+        let isMarked = model.markedDuplicateIDs.contains(file.id)
+        let isLastKept = DuplicateSelection.isLastKept(file, in: group, marked: model.markedDuplicateIDs)
         return HStack(spacing: 10) {
             Button {
-                toggle(file, in: group)
+                model.toggleDuplicateMark(file, in: group)
             } label: {
                 Image(systemName: isMarked ? "trash.circle.fill" : "checkmark.circle")
                     .font(.system(size: 16))
@@ -179,7 +223,7 @@ struct DuplicatesView: View {
         .contextMenu {
             FileContextMenu(
                 path: file.path,
-                name: (file.path as NSString).lastPathComponent,
+                name: file.name,
                 sizeBytes: file.size,
                 isDirectory: false,
                 // Trashing straight from the menu would bypass the review model
@@ -189,48 +233,20 @@ struct DuplicatesView: View {
                     ? "This is the last copy in its set — UnDupe always keeps one."
                     : nil,
                 onReveal: { FileActions.reveal(file.path) },
-                onTrash: { model.trash([file]); marked.remove(file.id) }
+                onTrash: { model.trashDuplicate(file, in: group) }
             )
         }
     }
 
-    // MARK: - Selection logic
+    // MARK: - Derived
 
-    /// Default selection: keep the copy with the shortest path (likely the
-    /// original / least-nested), mark the rest for trashing.
-    private func resetSelection() {
-        var next: Set<UUID> = []
-        for group in model.duplicates {
-            let sorted = group.files.sorted { $0.path.count < $1.path.count }
-            for file in sorted.dropFirst() { next.insert(file.id) }
-        }
-        marked = next
+    /// The marked copies that are still in a set. Marks for files that have
+    /// since left the list (trashed, or their set dissolved) are ignored.
+    private var markedFiles: [FileNode] {
+        model.duplicates.flatMap { $0.files }.filter { model.markedDuplicateIDs.contains($0.id) }
     }
 
-    private func keptCount(in group: DuplicateGroup) -> Int {
-        group.files.filter { !marked.contains($0.id) }.count
-    }
-
-    private func toggle(_ file: FileNode, in group: DuplicateGroup) {
-        if marked.contains(file.id) {
-            marked.remove(file.id)
-        } else if keptCount(in: group) > 1 {
-            marked.insert(file.id)        // refuse to mark the last kept copy
-        }
-    }
-
-    private var markedReclaimable: [FileNode] {
-        model.duplicates.flatMap { $0.files }.filter { marked.contains($0.id) }
-    }
-
-    private var markedReclaimableBytes: Int64 {
-        markedReclaimable.reduce(0) { $0 + $1.size }
-    }
-
-    private func trashMarked() {
-        let files = markedReclaimable
-        guard !files.isEmpty else { return }
-        model.trash(files)
-        marked.removeAll()
+    private var markedBytes: Int64 {
+        markedFiles.reduce(0) { $0 + $1.size }
     }
 }

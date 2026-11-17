@@ -49,17 +49,21 @@ struct AppCommands: Commands {
         }
 
         CommandGroup(replacing: .newItem) {
-            Button("New Scan…") { model.reset() }
+            // Works from anywhere, including the mode picker and System Cleanup:
+            // it always lands on the screen where a scan is chosen.
+            Button("New Scan…") { model.startNewScan() }
                 .keyboardShortcut("n")
+            // Only where there is a finished scan on screen to refresh. During a
+            // scan this would start a second one over the first.
             Button("Rescan") { model.rescan() }
                 .keyboardShortcut("r")
-                .disabled(model.selectedRoot == nil)
+                .disabled(!model.isShowingResults)
         }
 
         CommandGroup(replacing: .undoRedo) {
             Button("Undo Move to Trash") { model.undoLastTrash() }
                 .keyboardShortcut("z")
-                .disabled(!model.canUndoTrash)
+                .disabled(!model.canUndoTrash || !model.isShowingResults)
         }
 
         // Every item here needs a focused map item, so each one greys out on the

@@ -16,7 +16,9 @@ the duplicates.
 - **System cleanup** — startup items, extensions, caches and logs, and an app
   uninstaller that finds an app's leftovers by bundle ID rather than guessing.
 - **Safe by default** — deletions go to the Trash through a single guard that
-  refuses system paths and app internals, and ⌘Z puts the last one back.
+  refuses system paths, whole volumes and app internals, and ⌘Z puts the last
+  one back. Before trashing duplicates it re-checks that the copy being kept is
+  still on disk.
 - **Fast** — directory metadata is read in bulk via `getattrlistbulk(2)` instead
   of a `stat()` per file: about 37,000 files in 0.3 seconds.
 
@@ -39,8 +41,8 @@ already running.
 
 UnDupe is not sandboxed — a disk scanner has to read what you point it at. To
 scan beyond your home folder, add it under **System Settings ▸ Privacy &
-Security ▸ Full Disk Access**. Without the grant it still runs, and says so when
-totals are incomplete.
+Security ▸ Full Disk Access**. Without the grant it still runs, and when a scan
+has to skip folders it can't read, the map says so and tells you how many.
 
 ## Build from source
 
@@ -67,6 +69,9 @@ squarified treemap and the update security model.
 - The disk map is drawn on a `Canvas` and isn't reachable by VoiceOver yet; the
   inspector and lists are.
 - Undo covers the most recent trash only.
+- Duplicates are compared for files of 1 MB and larger.
+- APFS clones (a Finder "Duplicate") share storage, so trashing one copy of a
+  cloned pair can free less than its listed size.
 
 ## License
 

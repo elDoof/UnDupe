@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import UnDupeCore
@@ -81,6 +82,9 @@ final class CleanupModel: ObservableObject {
     // MARK: - Navigation
 
     func open(_ module: Module) {
+        // One banner is shared by every module; without clearing it, the result
+        // of clearing junk would greet the user on the uninstaller screen.
+        statusMessage = nil
         activeModule = module
         switch module {
         case .startup:     loadStartupItems()
@@ -90,7 +94,10 @@ final class CleanupModel: ObservableObject {
         }
     }
 
-    func closeModule() { activeModule = nil }
+    func closeModule() {
+        activeModule = nil
+        statusMessage = nil
+    }
 
     /// Kicks off all four module scans for the dashboard. Each loader guards its
     /// own re-entrancy, so this is safe to call on every dashboard appearance.
@@ -103,12 +110,27 @@ final class CleanupModel: ObservableObject {
 
     // MARK: - Dashboard stats
 
-    /// Genuinely reclaimable space: removable junk plus the leftover cruft apps
-    /// scatter (not the app bundles themselves — those are apps you may want).
-    var reclaimableBytes: Int64 { junkBytes + appLeftoverBytes }
+    /// What the dashboard may honestly call "reclaimable now": the junk that
+    /// Automatic Cleanup will clear, and nothing else.
+    ///
+    /// It used to add every installed app's support files as well. Those are
+    /// only "leftovers" once the app is uninstalled — until then they are the
+    /// preferences and data of apps in daily use — and the caches among them
+    /// were already counted as junk.
+    var reclaimableBytes: Int64 { autoCleanableJunkBytes }
 
+    /// The categories Automatic Cleanup offers: regenerable junk only.
+    var autoCleanableJunkCategories: [JunkCategory] {
+        junkCategories.filter { $0.isAutoCleanable }
+    }
+
+    var autoCleanableJunkBytes: Int64 {
+        autoCleanableJunkCategories.reduce(0) { $0 + $1.totalBytes }
+    }
+
+    /// Everything the Junk module lists, including what needs a deliberate
+    /// choice (Xcode archives).
     var junkBytes: Int64 { junkCategories.reduce(0) { $0 + $1.totalBytes } }
-    var appLeftoverBytes: Int64 { installedApps.reduce(0) { $0 + $1.leftoverBytes } }
     var uninstallableAppsBytes: Int64 {
         installedApps.filter { $0.canUninstall }.reduce(0) { $0 + $1.totalBytes }
     }
@@ -136,12 +158,12 @@ final class CleanupModel: ObservableObject {
             return "\(mine) yours · \(startupItems.count) total"
         case .extensions:
             let shown = extensions.filter { $0.owner != .apple }.count
-            return "\(shown) extensions"
+            return CountFormat.string(shown, "extension")
         case .junk:
             return ByteFormat.string(junkBytes)
         case .uninstaller:
             let count = installedApps.filter { $0.canUninstall }.count
-            return "\(ByteFormat.string(uninstallableAppsBytes)) · \(count) apps"
+            return "\(ByteFormat.string(uninstallableAppsBytes)) · \(CountFormat.string(count, "app"))"
         }
     }
 
@@ -178,7 +200,7 @@ final class CleanupModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.statusMessage = failures == 0
-                    ? "Disabled \(disabled) item(s). Re-enable any time below."
+                    ? "Disabled \(CountFormat.string(disabled, "item")). Re-enable any time below."
                     : "Disabled \(disabled). \(failures) couldn't be changed."
                 self.loadStartupItems()
             }
@@ -196,7 +218,7 @@ final class CleanupModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.statusMessage = failed == 0
-                    ? "Moved \(succeeded) login item(s) to Trash."
+                    ? "Moved \(CountFormat.string(succeeded, "login item")) to Trash."
                     : "Removed \(succeeded). \(failed) couldn't be removed."
                 self.loadStartupItems()
             }
@@ -258,7 +280,7 @@ final class CleanupModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.statusMessage = failed == 0
-                    ? "Moved \(succeeded) plugin(s) to Trash."
+                    ? "Moved \(CountFormat.string(succeeded, "plugin")) to Trash."
                     : "Removed \(succeeded). \(failed) couldn't be removed."
                 self.loadExtensions()
             }
@@ -302,7 +324,7 @@ final class CleanupModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.statusMessage = failed == 0
-                    ? "\(verb) \(succeeded) item(s) — freed \(ByteFormat.string(reclaimed))."
+                    ? "\(verb) \(CountFormat.string(succeeded, "item")) — freed \(ByteFormat.string(reclaimed))."
                     : "\(verb) \(succeeded) (\(ByteFormat.string(reclaimed))). \(failed) couldn't be removed."
                 self.loadJunk()
                 completion(reclaimed, failed)
@@ -331,8 +353,18 @@ final class CleanupModel: ObservableObject {
     /// always removed; for its leftovers, any path in `keptLeftovers` is left in
     /// place (the user chose to keep it — e.g. preferences), everything else goes.
     func uninstallApps(_ apps: [InstalledApp], keepingLeftovers keptLeftovers: Set<String> = []) {
-        let removable = apps.filter { $0.canUninstall }
-        guard !removable.isEmpty else { return }
+        // Checked again here, at the moment of removal, not just when the list
+        // was drawn: the user may have launched one of these since.
+        let running = Self.runningAppBundlePaths()
+        let uninstallable = apps.filter { $0.canUninstall }
+        let removable = uninstallable.filter { !running.contains($0.bundlePath) }
+        let skippedRunning = uninstallable.count - removable.count
+        guard !removable.isEmpty else {
+            if skippedRunning > 0 {
+                statusMessage = "Nothing was uninstalled — quit \(CountFormat.noun(skippedRunning, "the app", plural: "those apps")) first, then try again."
+            }
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let results = removable.flatMap { app -> [TrashResult] in
                 let leftoverPaths = Set(app.leftovers.map(\.path)).subtracting(keptLeftovers)
@@ -343,11 +375,25 @@ final class CleanupModel: ObservableObject {
             let reclaimed = results.reduce(0) { $0 + $1.reclaimedBytes }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.statusMessage = failed == 0
-                    ? "Uninstalled \(removable.count) app(s) — freed \(ByteFormat.string(reclaimed))."
-                    : "Uninstalled \(removable.count) app(s), \(ByteFormat.string(reclaimed)) freed. \(failed) item(s) couldn't be removed."
+                let apps = CountFormat.string(removable.count, "app")
+                var message = failed == 0
+                    ? "Uninstalled \(apps) — freed \(ByteFormat.string(reclaimed))."
+                    : "Uninstalled \(apps), \(ByteFormat.string(reclaimed)) freed. \(CountFormat.string(failed, "item")) couldn't be removed."
+                if skippedRunning > 0 {
+                    message += " Skipped \(CountFormat.string(skippedRunning, "app")) still running."
+                }
+                self.statusMessage = message
                 self.loadApps()
             }
         }
+    }
+
+    /// Bundle paths of every app currently running. Uninstalling one of these
+    /// pulls the bundle out from under a live process, which then misbehaves
+    /// until it is quit — so the uninstaller asks the user to quit it first.
+    static func runningAppBundlePaths() -> Set<String> {
+        Set(NSWorkspace.shared.runningApplications.compactMap { app in
+            app.bundleURL.map { ($0.path as NSString).standardizingPath }
+        })
     }
 }

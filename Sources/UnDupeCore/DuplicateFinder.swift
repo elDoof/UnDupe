@@ -72,7 +72,11 @@ public final class DuplicateFinder {
         minSize: Int64 = DuplicateFinder.defaultMinSize,
         progress: @escaping (Progress) -> Void
     ) -> [DuplicateGroup] {
-        lock.lock(); cancelledFlag = false; hashedCount = 0; lastProgressReport = .distantPast; lock.unlock()
+        // The cancel flag is deliberately *not* cleared here. `find` runs on a
+        // background queue, so a cancel can arrive before it starts; resetting
+        // the flag would lose that cancel and hash the whole drive for a result
+        // nobody will read. A finder is single-use: make a new one to search again.
+        lock.lock(); hashedCount = 0; lastProgressReport = .distantPast; lock.unlock()
 
         // Stage 1 — group by size. Two filters keep the result focused on what a
         // user can actually clean:
@@ -125,6 +129,9 @@ public final class DuplicateFinder {
         }
 
         if isCancelled { return [] }
+        // The throttle can swallow the last few updates; always finish on the
+        // total so the UI never ends a completed search at "97%".
+        progress(Progress(filesHashed: totalToHash, totalToHash: totalToHash))
         // Largest reclaimable savings first.
         return results.sorted { $0.reclaimableBytes > $1.reclaimableBytes }
     }
@@ -152,14 +159,22 @@ public final class DuplicateFinder {
 
         var groups: [DuplicateGroup] = []
 
+        // Every candidate counts toward progress exactly once, when its fate is
+        // settled. Most are settled right here — unreadable, or alone in their
+        // prefix bucket — and never reach the full hash; counting only the
+        // survivors would leave the bar stuck far short of its total.
+        let contenders = byPrefix.values.filter { $0.count > 1 }
+        let settledByPrefix = sameSize.count - contenders.reduce(0) { $0 + $1.count }
+        reportSettled(settledByPrefix, progress: progress, total: totalToHash)
+
         // Stage 3: confirm with full hash within each prefix bucket.
-        for bucket in byPrefix.values where bucket.count > 1 {
+        for bucket in contenders {
             var byFull: [Data: [FileNode]] = [:]
             for file in bucket {
                 if isCancelled { return [] }
                 autoreleasepool {
                     let digest = Self.hash(path: file.path, maxBytes: nil)
-                    reportHashed(progress: progress, total: totalToHash)
+                    reportSettled(1, progress: progress, total: totalToHash)
                     guard let digest else { return }
                     byFull[digest, default: []].append(file)
                 }
@@ -171,12 +186,13 @@ public final class DuplicateFinder {
         return groups
     }
 
-    private func reportHashed(progress: @escaping (Progress) -> Void, total: Int) {
+    private func reportSettled(_ count: Int, progress: @escaping (Progress) -> Void, total: Int) {
+        guard count > 0 else { return }
         // `hashedCount` advances on every call so the running total stays exact, but
         // the callback is throttled: without this, one `DispatchQueue.main.async` per
         // hashed file floods the main queue and stalls the UI on large drives.
         lock.lock()
-        hashedCount += 1
+        hashedCount += count
         let n = hashedCount
         let now = Date()
         let due = now.timeIntervalSince(lastProgressReport) >= Self.progressThrottle
@@ -188,13 +204,20 @@ public final class DuplicateFinder {
     // MARK: - Hashing
 
     /// SHA-256 of a file. When `maxBytes` is non-nil, hashes only the first
-    /// `maxBytes` bytes (the cheap prefix probe). Returns nil if unreadable.
-    private static func hash(path: String, maxBytes: Int?) -> Data? {
+    /// `maxBytes` bytes (the cheap prefix probe).
+    ///
+    /// Returns nil if the file can't be opened **or a read fails partway**. The
+    /// second case matters: treating a failed read as end-of-file would hash
+    /// whatever was read so far, so two files that both fail at the same offset
+    /// (a dying disk, an unmounted share) would come out equal and be presented
+    /// as verified duplicates.
+    static func hash(path: String, maxBytes: Int?) -> Data? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
 
         var hasher = SHA256()
         var remaining = maxBytes ?? Int.max
+        var didReadFail = false
 
         // Each chunk read from FileHandle is an autoreleased buffer. Without a pool
         // per iteration these accumulate for the whole file — streaming a multi-GB
@@ -202,15 +225,22 @@ public final class DuplicateFinder {
         // group of large media duplicates balloons to tens of GB (the freeze bug).
         // The pool drains each chunk as soon as it's folded into the hash.
         while remaining > 0 {
-            let reachedEnd: Bool = autoreleasepool {
+            let isFinished: Bool = autoreleasepool {
                 let want = min(remaining, streamChunkBytes)
-                guard let chunk = try? handle.read(upToCount: want), !chunk.isEmpty else { return true }
+                let chunk: Data?
+                do {
+                    chunk = try handle.read(upToCount: want)
+                } catch {
+                    didReadFail = true
+                    return true
+                }
+                guard let chunk, !chunk.isEmpty else { return true }   // end of file
                 hasher.update(data: chunk)
                 remaining -= chunk.count
                 return false
             }
-            if reachedEnd { break }
+            if isFinished { break }
         }
-        return Data(hasher.finalize())
+        return didReadFail ? nil : Data(hasher.finalize())
     }
 }

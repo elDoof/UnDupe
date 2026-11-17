@@ -111,7 +111,7 @@ struct HomeView: View {
 
                         ForEach(volumes) { volume in
                             targetRow(
-                                icon: "externaldrive.fill",
+                                icon: volume.isInternal ? "internaldrive.fill" : "externaldrive.fill",
                                 title: volume.name,
                                 subtitle: volume.totalBytes > 0
                                     ? "\(ByteFormat.string(volume.usedBytes)) used of \(ByteFormat.string(volume.totalBytes))"
@@ -150,7 +150,20 @@ struct HomeView: View {
             // The user may have granted access in System Settings since last time.
             model.refreshFullDiskAccess()
         }
+        // A drive plugged in or ejected while this screen is open should show
+        // up (or disappear) without a trip away and back.
+        .onReceive(Self.volumeChanges) { _ in
+            volumes = model.availableVolumes()
+        }
     }
+
+    /// Fires whenever a volume is mounted or unmounted. These arrive on
+    /// `NSWorkspace`'s own notification center, not the default one.
+    private static let volumeChanges = NSWorkspace.shared.notificationCenter
+        .publisher(for: NSWorkspace.didMountNotification)
+        .merge(with: NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didUnmountNotification))
+        .receive(on: DispatchQueue.main)
 
     private func targetRow(icon: String, title: String, subtitle: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -280,7 +293,9 @@ struct ScanProgressView: View {
     }
 
     private var scanTargetName: String {
-        let name = (model.scanningPath as NSString).lastPathComponent
+        // The root, not `scanningPath`: that one follows the folder being read
+        // right now, which made the headline flicker through every subfolder.
+        let name = (model.scanRootPath as NSString).lastPathComponent
         return name.isEmpty ? "disk" : name
     }
 

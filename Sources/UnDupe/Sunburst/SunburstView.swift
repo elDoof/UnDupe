@@ -126,7 +126,7 @@ struct SunburstView: View {
                 Text(ByteFormat.string(focus.size))
                     .font(.system(size: 15, weight: .bold, design: .rounded))
                     .foregroundStyle(Theme.accent)
-                Text("\(focus.fileCount) files")
+                Text(CountFormat.string(focus.fileCount, "file"))
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.tertiaryText)
             }

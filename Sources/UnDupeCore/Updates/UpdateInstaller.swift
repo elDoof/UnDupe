@@ -108,10 +108,13 @@ public struct UpdateInstaller: Sendable {
 
     // MARK: - Disk image handling
 
+    private static let hdiutil = "/usr/bin/hdiutil"
+    /// Verifying and attaching a large image on a slow disk can take a while;
+    /// well past this, something is wrong rather than slow.
+    private static let diskImageTimeout: TimeInterval = 180
+
     private func mount(_ dmgURL: URL) throws -> URL {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        process.arguments = [
+        let arguments = [
             "attach", dmgURL.path,
             "-nobrowse",            // don't clutter the user's Finder sidebar
             "-readonly",
@@ -119,24 +122,16 @@ public struct UpdateInstaller: Sendable {
             // A downloaded image must never be allowed to open anything on mount.
             "-noautoopen",
         ]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            throw UpdateError.diskImageFailed(error.localizedDescription)
+        guard let result = ProcessRunner.run(Self.hdiutil, arguments,
+                                             timeout: Self.diskImageTimeout) else {
+            throw UpdateError.diskImageFailed("hdiutil couldn't be run, or didn't finish in time")
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-
-        guard process.terminationStatus == 0 else {
-            throw UpdateError.diskImageFailed("hdiutil exited with \(process.terminationStatus)")
+        guard result.isSuccess else {
+            throw UpdateError.diskImageFailed("hdiutil exited with \(result.status)")
         }
 
         guard let plist = try? PropertyListSerialization.propertyList(
-                from: data, options: [], format: nil) as? [String: Any],
+                from: result.data, options: [], format: nil) as? [String: Any],
               let entities = plist["system-entities"] as? [[String: Any]] else {
             throw UpdateError.diskImageFailed("couldn't read hdiutil's reply")
         }
@@ -147,12 +142,10 @@ public struct UpdateInstaller: Sendable {
     }
 
     private func detach(_ mountPoint: URL) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
-        process.arguments = ["detach", mountPoint.path, "-quiet"]
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
+        // Best effort: a mount that won't detach is left for the system to clean
+        // up, and must not turn a successful install into a failure.
+        _ = ProcessRunner.run(Self.hdiutil, ["detach", mountPoint.path, "-quiet"],
+                              timeout: Self.diskImageTimeout)
     }
 
     // MARK: - Scratch space

@@ -109,8 +109,18 @@ struct HoverHighlight: ViewModifier {
             .scaleEffect(isHovering ? 1.012 : 1)
             .animation(.easeOut(duration: 0.14), value: isHovering)
             .onHover { hovering in
+                guard hovering != isHovering else { return }
                 isHovering = hovering
                 if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            // Clicking a row usually navigates away, which removes the view
+            // without ever delivering the "hover ended" event. Without this the
+            // pushed cursor is never popped and the pointing hand follows the
+            // user onto the next screen.
+            .onDisappear {
+                guard isHovering else { return }
+                isHovering = false
+                NSCursor.pop()
             }
     }
 }
